@@ -11,6 +11,7 @@ namespace StudioSync {
         std::vector<std::string> editedLast;  // headset playlists replaced by Studio edits in the last sync
         std::vector<std::string> addedLast;   // new playlists Studio created in the last sync
         std::vector<std::string> restoredLast;  // playlists put back from a backup in the last sync
+        std::vector<std::string> deletedLast;   // playlists deleted from Studio in the last sync (kept as backups)
         int shared = 0;                       // headset playlists visible in Studio
         int total = 0;                        // all of the player's own playlists
         std::string lastSync;                 // local time of the last good sync, e.g. "8:31 AM"

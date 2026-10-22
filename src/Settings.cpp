@@ -64,6 +64,11 @@ namespace {
             for (size_t i = 0; i < s.editedLast.size() && i < MAX_LISTED; i++)
                 out += "  " + s.editedLast[i] + "\n";
         }
+        if (!s.deletedLast.empty()) {
+            out += "<b>Deleted in Studio</b> <color=#9aa4b2>(restorable for 30 days)</color>\n";
+            for (size_t i = 0; i < s.deletedLast.size() && i < MAX_LISTED; i++)
+                out += "  " + s.deletedLast[i] + "\n";
+        }
         if (!s.restoredLast.empty()) {
             out += "<b>Restored from a backup</b>\n";
             for (size_t i = 0; i < s.restoredLast.size() && i < MAX_LISTED; i++)

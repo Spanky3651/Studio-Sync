@@ -30,6 +30,8 @@ namespace StudioSync {
         constexpr int LINK_POLL_SECONDS = 5;
         constexpr int LINK_GIVE_UP_SECONDS = 11 * 60;
         constexpr size_t BACKUPS_PER_PLAYLIST = 3;
+        constexpr int64_t KEEP_DELETED_SECONDS = 30 * 86400;  // deleted playlists stay restorable this long
+        constexpr size_t MAX_DELETED_LISTED = 30;
 
         using Http::Response;
         using SyncedMap = std::map<std::string, int64_t>;
@@ -45,13 +47,14 @@ namespace StudioSync {
             bool create = false;  // a new playlist Studio made for this headset
             int64_t restore = 0;  // put back the backup taken at this time instead of downloading
             std::string savedAs;  // set when a new playlist had to take another name
+            bool remove = false;  // delete it (it's kept as a backup Studio can restore)
         };
         // One sync from start to finish; each step hands it to the next.
         struct Run {
             std::string token;
             std::vector<Item> items;
             std::vector<Write> writes;
-            std::vector<std::string> edited, created, restored;
+            std::vector<std::string> edited, created, restored, deleted;
             std::vector<std::string> need;
             bool changed = false;
             int written = 0, removed = 0, failed = 0, shared = 0, total = 0;
@@ -254,6 +257,7 @@ namespace StudioSync {
         struct BackupInfo {
             int64_t time = 0;
             int count = -1;
+            std::string title, path;
         };
         // Every playlist's backups, newest first, keyed by playlist file name.
         std::map<std::string, std::vector<BackupInfo>> AllBackups() {
@@ -274,8 +278,11 @@ namespace StudioSync {
                 info.time = std::strtoll(digits.c_str(), nullptr, 10);
                 rapidjson::Document doc;
                 std::error_code sec;
-                if (e.file_size(sec) <= MAX_PLAYLIST_BYTES && ParseText(readfile(e.path().string()), doc) && IsPlaylist(doc))
+                info.path = e.path().string();
+                if (e.file_size(sec) <= MAX_PLAYLIST_BYTES && ParseText(readfile(info.path), doc) && IsPlaylist(doc)) {
                     info.count = (int) doc["songs"].Size();
+                    info.title = GetString(doc, "playlistTitle");
+                }
                 out[stem.substr(0, dot)].push_back(info);
             }
             for (auto& [file, list] : out)
@@ -384,11 +391,12 @@ namespace StudioSync {
             summary.editedLast = run->edited;
             summary.addedLast = run->created;
             summary.restoredLast = run->restored;
+            summary.deletedLast = run->deleted;
             summary.shared = run->shared;
             summary.total = run->total;
             summary.lastSync = LocalTimeNow();
             std::string text = "Up to date";
-            if (run->written || run->removed || !run->edited.empty() || !run->created.empty() || !run->restored.empty()) {
+            if (run->written || run->removed || !run->edited.empty() || !run->created.empty() || !run->restored.empty() || !run->deleted.empty()) {
                 text = "Synced";
                 if (!run->created.empty())
                     text += ", " + std::to_string(run->created.size()) + " added";
@@ -398,6 +406,8 @@ namespace StudioSync {
                     text += ", " + std::to_string(run->edited.size()) + " edited";
                 if (!run->restored.empty())
                     text += ", " + std::to_string(run->restored.size()) + " restored";
+                if (!run->deleted.empty())
+                    text += ", " + std::to_string(run->deleted.size()) + " deleted";
                 if (run->removed)
                     text += ", " + std::to_string(run->removed) + " removed";
             }
@@ -419,7 +429,31 @@ namespace StudioSync {
                 return;
             }
             bool exists = std::filesystem::exists(PathIn(w.file), ec);
-            if (!w.create && !exists) {
+            if (w.remove) {
+                // Deleting never loses anything: the playlist becomes a backup Studio can restore for 30 days.
+                auto path = PathIn(w.file);
+                if (exists && !Excluded(w.file)) {
+                    auto text = readfile(path);
+                    Backup(w.file, text);
+                    RemoveFile(path);
+                    if (std::filesystem::exists(path, ec))
+                        std::filesystem::remove(path, ec);
+                    if (!std::filesystem::exists(path, ec)) {
+                        rapidjson::Document doc;
+                        auto title = ParseText(text, doc) ? GetString(doc, "playlistTitle") : "";
+                        run->deleted.push_back(title.empty() ? w.file : title);
+                        run->changed = true;
+                    } else {
+                        run->failed++;
+                        ApplyWrite(run, i + 1);
+                        return;
+                    }
+                }
+                Ack(run, w.id);
+                ApplyWrite(run, i + 1);
+                return;
+            }
+            if (!w.create && !exists && w.restore == 0) {
                 // The playlist was deleted on the headset; nothing to edit or restore.
                 logger.warn("Studio sent a change for {} but it's gone; dropping it", w.file);
                 Ack(run, w.id);
@@ -438,7 +472,9 @@ namespace StudioSync {
                 }
                 auto path = PathIn(w.file);
                 // The version being replaced becomes a backup too, so a restore can be undone.
-                Backup(w.file, readfile(path));
+                // A deleted playlist has nothing to replace; restoring just brings it back.
+                if (exists)
+                    Backup(w.file, readfile(path));
                 if (writefile(path, text)) {
                     if (auto playlist = PlaylistCore::GetPlaylist(path))
                         PlaylistCore::MarkPlaylistForReload(playlist);
@@ -575,10 +611,12 @@ namespace StudioSync {
             run->shared = 0;
             run->total = 0;
             auto backups = AllBackups();
+            std::set<std::string> present;
             for (auto const& entry : std::filesystem::directory_iterator(PlaylistsDir(), ec)) {
                 auto name = entry.path().filename().string();
                 if (!entry.is_regular_file() || name.starts_with(FILE_PREFIX) || !ValidFile(name))
                     continue;
+                present.insert(name);
                 run->total++;
                 if (Excluded(name))
                     continue;
@@ -608,6 +646,45 @@ namespace StudioSync {
                 run->shared++;
             }
             body.AddMember("items", list, a);
+
+            // Playlists that are gone but still have backups: Studio lists them as recently deleted.
+            // After 30 days their backups are cleared out.
+            std::vector<std::pair<std::string, std::vector<BackupInfo> const*>> gone;
+            auto cutoff = (int64_t) std::time(nullptr) - KEEP_DELETED_SECONDS;
+            for (auto const& [file, list] : backups) {
+                if (present.contains(file) || list.empty() || !ValidFile(file))
+                    continue;
+                if (list.front().time < cutoff) {
+                    for (auto const& b : list)
+                        std::filesystem::remove(b.path, ec);
+                    continue;
+                }
+                if (!Excluded(file))
+                    gone.emplace_back(file, &list);
+            }
+            std::sort(gone.begin(), gone.end(), [](auto const& x, auto const& y) { return x.second->front().time > y.second->front().time; });
+            rapidjson::Value deleted(rapidjson::kArrayType);
+            for (size_t g = 0; g < gone.size() && g < MAX_DELETED_LISTED; g++) {
+                auto const& [file, list] = gone[g];
+                rapidjson::Value dv(rapidjson::kObjectType);
+                dv.AddMember("file", rapidjson::Value(file.c_str(), a), a);
+                dv.AddMember("title", rapidjson::Value(list->front().title.c_str(), a), a);
+                rapidjson::Value baks(rapidjson::kArrayType);
+                for (auto const& b : *list) {
+                    rapidjson::Value bv(rapidjson::kObjectType);
+                    bv.AddMember("t", b.time, a);
+                    bv.AddMember("count", b.count, a);
+                    baks.PushBack(bv, a);
+                }
+                dv.AddMember("backups", baks, a);
+                deleted.PushBack(dv, a);
+            }
+            body.AddMember("deleted", deleted, a);
+            // What this version of the mod can do, so Studio only offers what it can carry out.
+            rapidjson::Value features(rapidjson::kArrayType);
+            features.PushBack("restore", a);
+            features.PushBack("delete", a);
+            body.AddMember("features", features, a);
             Post(Server() + "/link/inventory", run->token, ToJson(body), [run](Response r) {
                 rapidjson::Document doc;
                 if (r.IsSuccessful() && ParseJson(r, doc) && doc.HasMember("need") && doc["need"].IsArray())
@@ -812,6 +889,7 @@ namespace StudioSync {
                         Write w{GetString(v, "id"), GetString(v, "file"), GetString(v, "url"), v.HasMember("create") && v["create"].IsBool() && v["create"].GetBool()};
                         if (v.HasMember("restore") && v["restore"].IsInt64())
                             w.restore = v["restore"].GetInt64();
+                        w.remove = v.HasMember("remove") && v["remove"].IsBool() && v["remove"].GetBool();
                         run->writes.push_back(std::move(w));
                     }
             ApplyWrite(run, 0);
