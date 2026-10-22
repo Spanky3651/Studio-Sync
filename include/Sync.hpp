@@ -9,6 +9,7 @@ namespace StudioSync {
     struct Summary {
         std::vector<std::string> fromStudio;  // titles of playlists Studio sends to this headset
         std::vector<std::string> editedLast;  // headset playlists replaced by Studio edits in the last sync
+        std::vector<std::string> addedLast;   // new playlists Studio created in the last sync
         int shared = 0;                       // headset playlists visible in Studio
         int total = 0;                        // all of the player's own playlists
         std::string lastSync;                 // local time of the last good sync, e.g. "8:31 AM"

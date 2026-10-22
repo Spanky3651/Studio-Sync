@@ -42,13 +42,14 @@ namespace StudioSync {
         // An edit Studio sent back for one of the headset's own playlists.
         struct Write {
             std::string id, file, url;
+            bool create = false;  // a new playlist Studio made for this headset
         };
         // One sync from start to finish; each step hands it to the next.
         struct Run {
             std::string token;
             std::vector<Item> items;
             std::vector<Write> writes;
-            std::vector<std::string> edited;
+            std::vector<std::string> edited, created;
             std::vector<std::string> need;
             bool changed = false;
             int written = 0, removed = 0, failed = 0, shared = 0, total = 0;
@@ -320,12 +321,15 @@ namespace StudioSync {
             for (auto const& it : run->items)
                 summary.fromStudio.push_back(it.title.empty() ? it.id : it.title);
             summary.editedLast = run->edited;
+            summary.addedLast = run->created;
             summary.shared = run->shared;
             summary.total = run->total;
             summary.lastSync = LocalTimeNow();
             std::string text = "Up to date";
-            if (run->written || run->removed || !run->edited.empty()) {
+            if (run->written || run->removed || !run->edited.empty() || !run->created.empty()) {
                 text = "Synced";
+                if (!run->created.empty())
+                    text += ", " + std::to_string(run->created.size()) + " added";
                 if (run->written)
                     text += ", " + std::to_string(run->written) + " downloaded";
                 if (!run->edited.empty())
@@ -346,9 +350,16 @@ namespace StudioSync {
             auto w = run->writes[i];
             auto path = PathIn(w.file);
             std::error_code ec;
-            // Only ever replace a playlist that's already on the headset, under its own name.
-            if (!ValidFile(w.file) || w.file.starts_with(FILE_PREFIX) || !std::filesystem::exists(path, ec) || w.url != Server() + "/link/outbox/" + w.id) {
+            bool exists = std::filesystem::exists(path, ec);
+            if (!ValidFile(w.file) || w.file.starts_with(FILE_PREFIX) || w.url != Server() + "/link/outbox/" + w.id || (!w.create && !exists)) {
                 run->failed++;
+                ApplyWrite(run, i + 1);
+                return;
+            }
+            // A new playlist never overwrites a file that's already there; drop it instead of retrying forever.
+            if (w.create && exists) {
+                logger.warn("Studio asked to create {} but it already exists; skipping", w.file);
+                Post(Server() + "/link/outbox/" + w.id + "/ack", run->token, "{}", [](Response) {});
                 ApplyWrite(run, i + 1);
                 return;
             }
@@ -356,13 +367,19 @@ namespace StudioSync {
                 rapidjson::Document edit;
                 bool ok = false;
                 if (r.IsSuccessful() && r.responseData->size() <= MAX_PLAYLIST_BYTES && ParseJson(r, edit) && IsPlaylist(edit)) {
-                    auto original = readfile(path);
-                    auto merged = Merge(original, edit);
-                    Backup(w.file, original);
-                    if (writefile(path, merged)) {
+                    std::string text;
+                    if (w.create)
+                        text = ToJson(edit);
+                    else {
+                        auto original = readfile(path);
+                        text = Merge(original, edit);
+                        Backup(w.file, original);
+                    }
+                    if (writefile(path, text)) {
                         if (auto playlist = PlaylistCore::GetPlaylist(path))
                             PlaylistCore::MarkPlaylistForReload(playlist);
-                        run->edited.push_back(GetString(edit, "playlistTitle").empty() ? w.file : GetString(edit, "playlistTitle"));
+                        auto title = GetString(edit, "playlistTitle").empty() ? w.file : GetString(edit, "playlistTitle");
+                        (w.create ? run->created : run->edited).push_back(title);
                         run->changed = true;
                         ok = true;
                         Post(Server() + "/link/outbox/" + w.id + "/ack", run->token, "{}", [](Response) {});
@@ -681,7 +698,7 @@ namespace StudioSync {
             if (doc.HasMember("writes") && doc["writes"].IsArray())
                 for (auto const& v : doc["writes"].GetArray())
                     if (v.IsObject())
-                        run->writes.push_back({GetString(v, "id"), GetString(v, "file"), GetString(v, "url")});
+                        run->writes.push_back({GetString(v, "id"), GetString(v, "file"), GetString(v, "url"), v.HasMember("create") && v["create"].IsBool() && v["create"].GetBool()});
             ApplyWrite(run, 0);
         });
     }

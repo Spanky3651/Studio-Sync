@@ -11,7 +11,8 @@ Built for Beat Saber **1.40.8** (Scotland2). Needs **PlaylistCore** and **BSML**
 4. In Studio's **Linked Quest** panel, press **Send to Quest** for the playlist you're building.
 
 The headset syncs when the game starts, each time you return to the main menu (at most every 2 minutes), when you open the tab, or right away with **Sync now**. Each sync:
-- pulls playlists Studio sent, refreshes changed ones and removes ones you took off in Studio,
+- writes new playlists you sent from Studio (as normal playlist files, never overwriting one that exists),
+- still pulls playlists linked the older hosted way, until you move them onto the headset from Studio,
 - shares your own playlists with Studio, so **On your Quest** lists them with an **Edit** button (choose which ones under **Sharing...**; switched-off playlists are never uploaded and their stored copy is deleted),
 - applies edits you sent back from Studio, replacing that playlist and keeping a backup.
 

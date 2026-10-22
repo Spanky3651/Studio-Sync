@@ -1,6 +1,7 @@
 #include "Settings.hpp"
 
 #include <chrono>
+#include <vector>
 
 #include "Sync.hpp"
 #include "main.hpp"
@@ -10,6 +11,7 @@
 #include "bsml/shared/BSML/Components/ModalView.hpp"
 
 #include "HMUI/CurvedTextMeshPro.hpp"
+#include "TMPro/TextAlignmentOptions.hpp"
 #include "UnityEngine/GameObject.hpp"
 #include "UnityEngine/Object.hpp"
 #include "UnityEngine/Transform.hpp"
@@ -18,6 +20,7 @@
 #include "UnityEngine/UI/Button.hpp"
 #include "UnityEngine/UI/ContentSizeFitter.hpp"
 #include "UnityEngine/UI/HorizontalLayoutGroup.hpp"
+#include "UnityEngine/UI/LayoutElement.hpp"
 #include "UnityEngine/UI/VerticalLayoutGroup.hpp"
 
 using namespace StudioSync;
@@ -30,6 +33,7 @@ namespace {
     UnityW<UnityEngine::GameObject> linkedRow;
     UnityW<BSML::ModalView> shareModal;
     UnityW<UnityEngine::Transform> shareList;
+    std::vector<UnityW<UnityEngine::GameObject>> shareRows;
     UnityW<HMUI::CurvedTextMeshPro> shareCount;
     bool shareChanged = false;
     std::chrono::steady_clock::time_point unlinkArmed{};
@@ -42,14 +46,18 @@ namespace {
     std::string Details() {
         auto const& s = GetSummary();
         std::string out;
-        if (s.fromStudio.empty()) {
-            out += "<color=#9aa4b2>No Studio playlists yet. In Playlist Studio, tick \"Sync to my linked Quest\" on a hosted playlist.</color>\n";
-        } else {
-            out += "<b>From Studio (" + std::to_string(s.fromStudio.size()) + ")</b>\n";
+        // Older links to playlists hosted by Studio (before it wrote straight to the headset).
+        if (!s.fromStudio.empty()) {
+            out += "<b>Linked from Studio (" + std::to_string(s.fromStudio.size()) + ")</b>\n";
             for (size_t i = 0; i < s.fromStudio.size() && i < MAX_LISTED; i++)
                 out += "  " + s.fromStudio[i] + "\n";
             if (s.fromStudio.size() > MAX_LISTED)
                 out += "  <color=#9aa4b2>and " + std::to_string(s.fromStudio.size() - MAX_LISTED) + " more</color>\n";
+        }
+        if (!s.addedLast.empty()) {
+            out += "<b>Added from Studio</b>\n";
+            for (size_t i = 0; i < s.addedLast.size() && i < MAX_LISTED; i++)
+                out += "  " + s.addedLast[i] + "\n";
         }
         if (!s.editedLast.empty()) {
             out += "<b>Edited in Studio</b>\n";
@@ -98,21 +106,34 @@ namespace {
         shareCount->set_text("Sharing " + std::to_string(on) + " of " + std::to_string(all) + ". Studio can only see and edit the ones switched on.");
     }
 
+    // Give a row a fixed height so the scroll content stacks it instead of overlapping.
+    template <class T> T* Sized(T* c, float height) {
+        auto le = c->get_gameObject()->template GetComponent<UnityEngine::UI::LayoutElement*>();
+        if (!le)
+            le = c->get_gameObject()->template AddComponent<UnityEngine::UI::LayoutElement*>();
+        le->set_preferredHeight(height);
+        le->set_minHeight(height);
+        return c;
+    }
+
     void FillShareList() {
         if (!shareList)
             return;
-        for (int i = shareList->get_childCount() - 1; i >= 0; i--)
-            UnityEngine::Object::Destroy(shareList->GetChild(i)->get_gameObject());
+        for (auto& row : shareRows)
+            if (row)
+                UnityEngine::Object::Destroy(row.ptr());
+        shareRows.clear();
         auto list = HeadsetPlaylists();
         if (list.empty())
-            BSML::Lite::CreateText(shareList.ptr(), "No playlists of your own on this headset yet.", TMPro::FontStyles::Italic, 3.5);
+            shareRows.push_back(Sized(BSML::Lite::CreateText(shareList.ptr(), "No playlists of your own on this headset yet.", TMPro::FontStyles::Italic, 3.5), 6.0f)->get_gameObject());
         for (auto const& p : list) {
             auto file = p.file;
-            BSML::Lite::CreateToggle(shareList.ptr(), Shorten(p.title, 34) + " (" + std::to_string(p.count) + ")", p.shared, [file](bool on) {
+            auto toggle = BSML::Lite::CreateToggle(shareList.ptr(), Shorten(p.title, 30) + " <color=#9aa4b2>(" + std::to_string(p.count) + ")</color>", p.shared, [file](bool on) {
                 SetShared(file, on);
                 shareChanged = true;
                 UpdateShareCount();
             });
+            shareRows.push_back(Sized(toggle, 7.0f)->get_gameObject());
         }
         UpdateShareCount();
     }
@@ -127,14 +148,26 @@ namespace {
     }
 
     void BuildShareModal(UnityEngine::Transform* parent) {
-        auto modal = BSML::Lite::CreateModal(parent, {95, 70}, [] { ShareClosed(); }, true);
+        auto modal = BSML::Lite::CreateModal(parent, {100, 78}, [] { ShareClosed(); }, true);
         shareModal = modal;
-        auto content = BSML::Lite::CreateScrollableModalContainer(modal)->get_transform();
-        BSML::Lite::CreateText(content, "Share with Playlist Studio", TMPro::FontStyles::Bold, 4.5);
-        shareCount = BSML::Lite::CreateText(content, "", TMPro::FontStyles::Normal, 3);
-        auto row = BSML::Lite::CreateHorizontalLayoutGroup(content);
+        auto content = BSML::Lite::CreateScrollableModalContainer(modal);
+        auto layout = content->GetComponent<UnityEngine::UI::VerticalLayoutGroup*>();
+        layout->set_childControlHeight(true);
+        layout->set_childForceExpandHeight(false);
+        layout->set_childAlignment(UnityEngine::TextAnchor::UpperCenter);
+        layout->set_spacing(1.0f);
+        auto parentT = content->get_transform();
+
+        Sized(BSML::Lite::CreateText(parentT, "Share with Playlist Studio", TMPro::FontStyles::Bold, 5), 7.0f)->set_alignment(TMPro::TextAlignmentOptions::Center);
+        auto count = Sized(BSML::Lite::CreateText(parentT, "", TMPro::FontStyles::Normal, 3.2), 9.0f);
+        count->set_alignment(TMPro::TextAlignmentOptions::Center);
+        count->set_enableWordWrapping(true);
+        shareCount = count;
+
+        auto row = Sized(BSML::Lite::CreateHorizontalLayoutGroup(parentT), 9.0f);
         row->set_spacing(2.0f);
         row->set_childForceExpandWidth(false);
+        row->set_childControlWidth(true);
         row->set_childAlignment(UnityEngine::TextAnchor::MiddleCenter);
         BSML::Lite::CreateUIButton(row->get_transform(), "Share all", [] { SetAllShared(true); shareChanged = true; FillShareList(); });
         BSML::Lite::CreateUIButton(row->get_transform(), "Share none", [] { SetAllShared(false); shareChanged = true; FillShareList(); });
@@ -143,12 +176,8 @@ namespace {
                 shareModal->Hide();
             ShareClosed();
         });
-        // Toggles live in their own group so refilling doesn't touch the header.
-        auto list = BSML::Lite::CreateVerticalLayoutGroup(content);
-        list->set_childControlHeight(true);
-        list->set_childForceExpandHeight(false);
-        list->set_spacing(0.5f);
-        shareList = list->get_transform();
+        // Toggles are added straight into the scroll content after the header.
+        shareList = parentT;
     }
 
     void OpenShare() {
