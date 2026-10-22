@@ -1,0 +1,17 @@
+{
+  "_QPVersion": "0.1.1",
+  "name": "${mod_name}",
+  "id": "${mod_id}",
+  "author": "MSploit",
+  "version": "${version}",
+  "modloader": "Scotland2",
+  "packageId": "com.beatgames.beatsaber",
+  "packageVersion": "1.40.8_7379",
+  "description": "Links your headset to Playlist Studio. Hosted playlists you pick there show up in game on their own and stay updated.",
+  "dependencies": [],
+  "lateModFiles": [
+    "${binary}"
+  ],
+  "libraryFiles": [],
+  "fileCopies": []
+}

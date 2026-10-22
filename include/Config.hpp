@@ -1,0 +1,13 @@
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "config-utils/shared/config-utils.hpp"
+
+DECLARE_CONFIG(Config) {
+    CONFIG_VALUE(Server, std::string, "server", "https://playlist-replay.msploit.workers.dev");
+    CONFIG_VALUE(Token, std::string, "token", "");
+    // "id=updated" for every playlist written to the headset
+    CONFIG_VALUE(Synced, std::vector<std::string>, "synced", std::vector<std::string>{});
+};

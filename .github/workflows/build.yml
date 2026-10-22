@@ -1,0 +1,54 @@
+name: Build
+
+env:
+  module_id: studiosync
+  qmodName: StudioSync
+
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - "**.md"
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        name: Checkout
+
+      - uses: seanmiddleditch/gha-setup-ninja@v3
+
+      - name: Create ndkpath.txt
+        run: |
+          echo "$ANDROID_NDK_LATEST_HOME" > ${GITHUB_WORKSPACE}/ndkpath.txt
+          cat ${GITHUB_WORKSPACE}/ndkpath.txt
+
+      - name: QPM Action
+        uses: Fernthedev/qpm-action@v1
+        with:
+          workflow_token: ${{ secrets.GITHUB_TOKEN }}
+          restore: true
+          cache: true
+          publish: false
+
+      - name: Build & create qmod
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          qpm s qmod
+
+      - name: Upload qmod
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.qmodName }}.qmod
+          path: ./${{ env.qmodName }}.qmod
+          if-no-files-found: error
+
+      - name: Upload debug library
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug_lib${{ env.module_id }}.so
+          path: ./build/debug/lib${{ env.module_id }}.so
+          if-no-files-found: warn

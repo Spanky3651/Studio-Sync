@@ -1,0 +1,17 @@
+.cache/
+.vscode/
+.idea/
+
+extern/
+ndkpath.txt
+qpm_defines.cmake
+extern.cmake
+mod.json
+
+build/
+*.zip
+*.qmod
+*.log
+
+.git-rewrite/
+.fuse_hidden*
