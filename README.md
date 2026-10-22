@@ -7,7 +7,7 @@ Built for Beat Saber **1.40.8** (Scotland2). Needs **PlaylistCore** and **BSML**
 ## Use it
 1. Install `StudioSync.qmod` with your mod manager (MBF, QuestPatcher).
 2. In game, open the **Mods** tab in the panel left of song select, pick **Studio Sync** and press **Link**. A 6-character code appears.
-3. In Playlist Studio, open **Linked Quest** and type the code.
+3. In Playlist Studio, open **Studio Sync** and type the code.
 4. In Studio's **Linked Quest** panel, press **Send to Quest** for the playlist you're building.
 
 The headset syncs when the game starts, each time you return to the main menu (at most every 2 minutes), when you open the tab, or right away with **Sync now**. Each sync:
