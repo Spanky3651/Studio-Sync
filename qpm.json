@@ -39,7 +39,8 @@
       "./extern/libs"
     ],
     "qmodIncludeFiles": [],
-    "qmodOutput": "./StudioSync.qmod"
+    "qmodOutput": "./StudioSync.qmod",
+    "ndk": "^27.3.13750724"
   },
   "dependencies": [
     {

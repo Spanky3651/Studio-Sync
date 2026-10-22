@@ -15,7 +15,7 @@ The headset checks for changes when the game starts and each time you return to 
 ## What it touches
 - Only files it wrote: `StudioSync_<id>.bplist` in `ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists`. Your other playlists are never read or changed.
 - Downloads only from the Playlist Studio Worker it is linked to, and only `.bplist` files that parse as playlists (2.5 MB max).
-- Its settings live in `ModData/com.beatgames.beatsaber/Configs/studiosync.json`, including the device token. The Worker stores only a SHA-256 of that token.
+- Its settings, including the device token, live in its config file under `ModData/com.beatgames.beatsaber/Configs/`. The Worker stores only a SHA-256 of that token.
 - **Unlink** (here or in Studio) stops syncing. Playlists already on the headset stay.
 
 ## Build
