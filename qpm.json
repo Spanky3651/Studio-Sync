@@ -25,7 +25,7 @@
       ],
       "qmod": [
         "pwsh ./scripts/build.ps1 $0?",
-        "pwsh ./scripts/createqmod.ps1"
+        "pwsh ./scripts/createqmod.ps1 -qmodName StudioSync"
       ],
       "restart": [
         "pwsh ./scripts/restart-game.ps1"
