@@ -39,6 +39,6 @@ extern "C" __attribute__((visibility("default"))) void late_load() {
     il2cpp_functions::Init();
     custom_types::Register::AutoRegister();
     BSML::Init();
-    BSML::Register::RegisterSettingsMenu<StudioSync::SettingsViewController*>("Studio Sync");
+    StudioSync::RegisterUI();
     INSTALL_HOOK(logger, MainMenuViewController_DidActivate);
 }

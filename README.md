@@ -6,7 +6,7 @@ Built for Beat Saber **1.40.8** (Scotland2). Needs **PlaylistCore** and **BSML**
 
 ## Use it
 1. Install `StudioSync.qmod` with your mod manager (MBF, QuestPatcher).
-2. In game: **Mod Settings → Studio Sync → Link**. A 6-character code appears.
+2. In game, open the **Mods** tab in the panel left of song select, pick **Studio Sync** and press **Link**. A 6-character code appears.
 3. In Playlist Studio, open **Linked Quest** and type the code.
 4. Host a playlist in **In-Game Sync** and tick **Sync to my linked Quest**.
 
