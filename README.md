@@ -20,13 +20,9 @@ The headset syncs when the game starts, each time you return to the main menu (a
 - deletes a playlist when you press **Delete** in Studio. Nothing is erased: the playlist moves into its backups and shows in Studio under **Recently deleted** for 30 days, where **Restore** brings it back. After 30 days those backups are cleared.
 
 ## In game
-Studio Sync lives in the **Mods** tab beside song select, next to mods like ReeSabers.
+Studio Sync lives in the **Mods** tab beside song select, next to mods like ReeSabers. **Sharing...** picks which of your playlists Studio can see, and **Download missing songs** turns automatic song downloads on or off.
 
 ![Studio Sync tab in the Mods panel, linked and up to date](docs/tab.jpg)
-
-**Sharing...** opens the list of your playlists. Switch off any you don't want Studio to see.
-
-![Sharing list with a switch for each headset playlist](docs/sharing.jpg)
 
 ## What it touches
 - Playlists linked the older hosted way are its own `StudioSync_<id>.bplist` files in `ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists`, removed when you move them onto the headset. Your own playlists are only removed when you press **Delete** in Studio, and even then a copy stays in backups for 30 days. Playlists switched off under **Sharing...** can't be changed or deleted from Studio.
