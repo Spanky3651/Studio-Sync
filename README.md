@@ -8,12 +8,16 @@ Built for Beat Saber **1.40.8** (Scotland2). Needs **PlaylistCore** and **BSML**
 1. Install `StudioSync.qmod` with your mod manager (MBF, QuestPatcher).
 2. In game, open the **Mods** tab in the panel left of song select, pick **Studio Sync** and press **Link**. A 6-character code appears.
 3. In Playlist Studio, open **Linked Quest** and type the code.
-4. Host a playlist in **In-Game Sync** and tick **Sync to my linked Quest**.
+4. In Studio's **Linked Quest** panel, press **Send to Quest** for the playlist you're building.
 
-The headset checks for changes when the game starts and each time you return to the main menu (at most every 2 minutes), or right away with **Sync now**. New playlists appear, updated ones refresh, and ones you remove in Studio disappear.
+The headset syncs when the game starts, each time you return to the main menu (at most every 2 minutes), when you open the tab, or right away with **Sync now**. Each sync:
+- pulls playlists Studio sent, refreshes changed ones and removes ones you took off in Studio,
+- shares your own playlists with Studio, so **On your Quest** lists them with an **Edit** button,
+- applies edits you sent back from Studio, replacing that playlist and keeping a backup.
 
 ## What it touches
-- Only files it wrote: `StudioSync_<id>.bplist` in `ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists`. Your other playlists are never read or changed.
+- Studio-sent playlists are its own `StudioSync_<id>.bplist` files in `ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists`; only those are ever deleted.
+- Your other playlists in that folder are read and uploaded to your private library so Studio can show them. One is changed only when you send an edit back from Studio: Studio's copy sets the title, author, description, songs and (if changed) the cover, and everything else in the file is kept. The previous version is saved to `Mods/StudioSync/backups/` (last 3 per playlist).
 - Downloads only from the Playlist Studio Worker it is linked to, and only `.bplist` files that parse as playlists (2.5 MB max).
 - Its settings, including the device token, live in its config file under `ModData/com.beatgames.beatsaber/Configs/`. The Worker stores only a SHA-256 of that token.
 - **Unlink** (here or in Studio) stops syncing. Playlists already on the headset stay.

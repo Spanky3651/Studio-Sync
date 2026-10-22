@@ -1,14 +1,16 @@
 #include "Sync.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
-#include <map>
+#include <ctime>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <random>
 #include <set>
-#include <span>
 #include <vector>
 
 #include "Config.hpp"
@@ -27,34 +29,36 @@ namespace StudioSync {
         constexpr size_t MAX_PLAYLIST_BYTES = 2500000;
         constexpr int LINK_POLL_SECONDS = 5;
         constexpr int LINK_GIVE_UP_SECONDS = 11 * 60;
+        constexpr size_t BACKUPS_PER_PLAYLIST = 3;
 
+        using Http::Response;
         using SyncedMap = std::map<std::string, int64_t>;
 
-        SyncedMap LoadSynced() {
-            SyncedMap out;
-            for (auto const& entry : getConfig().Synced.GetValue()) {
-                auto eq = entry.find('=');
-                if (eq == std::string::npos)
-                    continue;
-                out[entry.substr(0, eq)] = std::strtoll(entry.c_str() + eq + 1, nullptr, 10);
-            }
-            return out;
-        }
-        void SaveSynced(SyncedMap const& map) {
-            std::vector<std::string> out;
-            for (auto const& [id, updated] : map)
-                out.push_back(id + "=" + std::to_string(updated));
-            getConfig().Synced.SetValue(out);
-        }
-
+        // A Studio-hosted playlist this headset should have.
         struct Item {
             std::string id, title, url;
             int64_t updated = 0;
         };
+        // An edit Studio sent back for one of the headset's own playlists.
+        struct Write {
+            std::string id, file, url;
+        };
+        // One sync from start to finish; each step hands it to the next.
+        struct Run {
+            std::string token;
+            std::vector<Item> items;
+            std::vector<Write> writes;
+            std::vector<std::string> edited;
+            std::vector<std::string> need;
+            bool changed = false;
+            int written = 0, removed = 0, failed = 0, shared = 0;
+        };
+        using RunPtr = std::shared_ptr<Run>;
 
         std::string pendingToken, code, status;
         std::chrono::steady_clock::time_point linkStarted, lastSync{};
         bool syncing = false;
+        Summary summary;
         std::function<void()> listener;
 
         void Notify() {
@@ -64,6 +68,22 @@ namespace StudioSync {
         void SetStatus(std::string text) {
             status = std::move(text);
             Notify();
+        }
+
+        SyncedMap LoadSynced() {
+            SyncedMap out;
+            for (auto const& entry : getConfig().Synced.GetValue()) {
+                auto eq = entry.find('=');
+                if (eq != std::string::npos)
+                    out[entry.substr(0, eq)] = std::strtoll(entry.c_str() + eq + 1, nullptr, 10);
+            }
+            return out;
+        }
+        void SaveSynced(SyncedMap const& map) {
+            std::vector<std::string> out;
+            for (auto const& [id, updated] : map)
+                out.push_back(id + "=" + std::to_string(updated));
+            getConfig().Synced.SetValue(out);
         }
 
         std::string Server() {
@@ -83,45 +103,100 @@ namespace StudioSync {
             return t;
         }
 
-        using Http::Response;
-
         void Post(std::string const& url, std::string const& token, std::string body, std::function<void(Response)> done) {
             Http::Request(url, token, std::move(body), std::move(done));
         }
-
         void Get(std::string const& url, std::string const& token, std::function<void(Response)> done) {
             Http::Request(url, token, std::nullopt, std::move(done));
         }
 
-        bool ParseJson(Response const& r, rapidjson::Document& doc) {
-            if (!r.responseData)
-                return false;
-            doc.Parse(r.responseData->c_str());
+        bool ParseText(std::string const& text, rapidjson::Document& doc) {
+            doc.Parse(text.c_str());
             return !doc.HasParseError() && doc.IsObject();
         }
-
+        bool ParseJson(Response const& r, rapidjson::Document& doc) {
+            return r.responseData && ParseText(*r.responseData, doc);
+        }
+        bool IsPlaylist(rapidjson::Document const& doc) {
+            return doc.IsObject() && doc.HasMember("songs") && doc["songs"].IsArray();
+        }
         std::string GetString(rapidjson::Value const& v, char const* key) {
+            if (!v.IsObject())
+                return "";
             auto it = v.FindMember(key);
             return it != v.MemberEnd() && it->value.IsString() ? it->value.GetString() : "";
+        }
+        std::string ToJson(rapidjson::Value const& v) {
+            rapidjson::StringBuffer sb;
+            rapidjson::Writer<rapidjson::StringBuffer> w(sb);
+            v.Accept(w);
+            return sb.GetString();
         }
 
         bool ValidId(std::string const& id) {
             if (id.size() < 6 || id.size() > 16)
                 return false;
-            for (char c : id)
-                if (!std::isalnum((unsigned char) c))
-                    return false;
-            return true;
+            return std::all_of(id.begin(), id.end(), [](char c) { return std::isalnum((unsigned char) c); });
+        }
+        // A plain file name inside the playlist folder, never a path.
+        bool ValidFile(std::string const& f) {
+            if (f.empty() || f.size() > 200 || f == "." || f == ".." || f.find_first_of("/\\") != std::string::npos || f.find('\0') != std::string::npos)
+                return false;
+            auto lower = f;
+            std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+            return lower.ends_with(".bplist") || lower.ends_with(".json");
         }
 
         std::string PlaylistsDir() {
             return getDataDir(std::string_view("PlaylistManager")) + "Playlists";
         }
+        std::string PathIn(std::string const& file) {
+            return (std::filesystem::path(PlaylistsDir()) / file).string();
+        }
         std::string PathFor(std::string const& id) {
-            return (std::filesystem::path(PlaylistsDir()) / (std::string(FILE_PREFIX) + id + ".bplist")).string();
+            return PathIn(std::string(FILE_PREFIX) + id + ".bplist");
         }
 
-        // Every playlist file this mod wrote, keyed by playlist id.
+        std::string UrlEncode(std::string const& s) {
+            static constexpr char hex[] = "0123456789ABCDEF";
+            std::string out;
+            for (unsigned char c : s) {
+                if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+                    out += (char) c;
+                else {
+                    out += '%';
+                    out += hex[c >> 4];
+                    out += hex[c & 15];
+                }
+            }
+            return out;
+        }
+
+        // Change detection only, so a fast non-cryptographic hash is enough.
+        std::string Fingerprint(std::string const& text) {
+            uint64_t h = 1469598103934665603ULL;
+            for (unsigned char c : text) {
+                h ^= c;
+                h *= 1099511628211ULL;
+            }
+            char buf[24];
+            std::snprintf(buf, sizeof(buf), "%016llx-%zx", (unsigned long long) h, text.size());
+            return buf;
+        }
+
+        std::string LocalTimeNow() {
+            std::time_t t = std::time(nullptr);
+            std::tm tm{};
+            localtime_r(&t, &tm);
+            char buf[16];
+            std::strftime(buf, sizeof(buf), "%I:%M %p", &tm);
+            std::string s = buf;
+            if (s.starts_with("0"))
+                s.erase(0, 1);
+            return s;
+        }
+
+        // Every playlist file this mod wrote for Studio-hosted playlists, keyed by playlist id.
         std::map<std::string, std::string> OurFiles() {
             std::map<std::string, std::string> files;
             std::error_code ec;
@@ -146,15 +221,271 @@ namespace StudioSync {
         void ForgetLink(std::string const& why) {
             getConfig().Token.SetValue("");
             SaveSynced({});
+            summary = {};
             SetStatus(why);
         }
 
-        void PollLink(std::string token);
+        // ---- backups and merging for edits sent back from Studio ----
 
+        void Backup(std::string const& file, std::string const& original) {
+            std::error_code ec;
+            auto dir = std::filesystem::path(getDataDir(std::string_view("StudioSync"))) / "backups";
+            std::filesystem::create_directories(dir, ec);
+            writefile((dir / (file + "." + std::to_string(std::time(nullptr)) + ".bak")).string(), original);
+            // Keep only the newest few backups of each playlist.
+            std::vector<std::filesystem::path> mine;
+            for (auto const& e : std::filesystem::directory_iterator(dir, ec))
+                if (e.path().filename().string().starts_with(file + "."))
+                    mine.push_back(e.path());
+            std::sort(mine.begin(), mine.end());
+            while (mine.size() > BACKUPS_PER_PLAYLIST) {
+                std::filesystem::remove(mine.front(), ec);
+                mine.erase(mine.begin());
+            }
+        }
+
+        std::string HashOf(rapidjson::Value const& song) {
+            auto h = GetString(song, "hash");
+            std::transform(h.begin(), h.end(), h.begin(), [](unsigned char c) { return std::tolower(c); });
+            return h;
+        }
+
+        // Studio's copy wins for title, author, description, songs and a new cover.
+        // Everything else in the headset's file (customData, PlaylistManager settings,
+        // extra per-song fields) is kept.
+        std::string Merge(std::string const& original, rapidjson::Document& edit) {
+            rapidjson::Document out;
+            if (!ParseText(original, out))
+                return ToJson(edit);
+            auto& a = out.GetAllocator();
+            auto set = [&](char const* key, rapidjson::Value const& v) {
+                rapidjson::Value copy(v, a);
+                if (out.HasMember(key))
+                    out[key] = copy;
+                else
+                    out.AddMember(rapidjson::Value(key, a), copy, a);
+            };
+            for (auto key : {"playlistTitle", "playlistAuthor", "playlistDescription"})
+                if (edit.HasMember(key) && edit[key].IsString())
+                    set(key, edit[key]);
+            if (edit.HasMember("image") && edit["image"].IsString() && edit["image"].GetStringLength() > 0)
+                set("image", edit["image"]);
+
+            std::map<std::string, rapidjson::Value const*> before;
+            if (out.HasMember("songs") && out["songs"].IsArray())
+                for (auto const& s : out["songs"].GetArray())
+                    if (s.IsObject() && !HashOf(s).empty())
+                        before.emplace(HashOf(s), &s);
+            rapidjson::Value songs(rapidjson::kArrayType);
+            for (auto const& s : edit["songs"].GetArray()) {
+                if (!s.IsObject())
+                    continue;
+                auto old = before.find(HashOf(s));
+                rapidjson::Value song(old != before.end() ? *old->second : s, a);
+                if (old != before.end()) {
+                    for (auto key : {"songName", "levelAuthorName", "difficulties"}) {
+                        if (!s.HasMember(key))
+                            continue;
+                        rapidjson::Value v(s[key], a);
+                        if (song.HasMember(key))
+                            song[key] = v;
+                        else
+                            song.AddMember(rapidjson::Value(key, a), v, a);
+                    }
+                }
+                songs.PushBack(song, a);
+            }
+            if (out.HasMember("songs"))
+                out["songs"] = songs;
+            else
+                out.AddMember("songs", songs, a);
+            return ToJson(out);
+        }
+
+        // ---- the sync pipeline: edits -> Studio playlists -> inventory -> finish ----
+
+        void ApplyItems(RunPtr run);
+        void SendInventory(RunPtr run);
+
+        void Finish(RunPtr run) {
+            syncing = false;
+            if (run->changed)
+                PlaylistCore::ReloadPlaylists(false);
+            summary.fromStudio.clear();
+            for (auto const& it : run->items)
+                summary.fromStudio.push_back(it.title.empty() ? it.id : it.title);
+            summary.editedLast = run->edited;
+            summary.shared = run->shared;
+            summary.lastSync = LocalTimeNow();
+            std::string text = "Up to date";
+            if (run->written || run->removed || !run->edited.empty()) {
+                text = "Synced";
+                if (run->written)
+                    text += ", " + std::to_string(run->written) + " downloaded";
+                if (!run->edited.empty())
+                    text += ", " + std::to_string(run->edited.size()) + " edited";
+                if (run->removed)
+                    text += ", " + std::to_string(run->removed) + " removed";
+            }
+            if (run->failed)
+                text += ". " + std::to_string(run->failed) + " failed, will retry.";
+            SetStatus(text);
+        }
+
+        void ApplyWrite(RunPtr run, size_t i) {
+            if (i >= run->writes.size()) {
+                ApplyItems(run);
+                return;
+            }
+            auto w = run->writes[i];
+            auto path = PathIn(w.file);
+            std::error_code ec;
+            // Only ever replace a playlist that's already on the headset, under its own name.
+            if (!ValidFile(w.file) || w.file.starts_with(FILE_PREFIX) || !std::filesystem::exists(path, ec) || w.url != Server() + "/link/outbox/" + w.id) {
+                run->failed++;
+                ApplyWrite(run, i + 1);
+                return;
+            }
+            Get(w.url, run->token, [run, i, w, path](Response r) {
+                rapidjson::Document edit;
+                bool ok = false;
+                if (r.IsSuccessful() && r.responseData->size() <= MAX_PLAYLIST_BYTES && ParseJson(r, edit) && IsPlaylist(edit)) {
+                    auto original = readfile(path);
+                    auto merged = Merge(original, edit);
+                    Backup(w.file, original);
+                    if (writefile(path, merged)) {
+                        if (auto playlist = PlaylistCore::GetPlaylist(path))
+                            PlaylistCore::MarkPlaylistForReload(playlist);
+                        run->edited.push_back(GetString(edit, "playlistTitle").empty() ? w.file : GetString(edit, "playlistTitle"));
+                        run->changed = true;
+                        ok = true;
+                        Post(Server() + "/link/outbox/" + w.id + "/ack", run->token, "{}", [](Response) {});
+                    }
+                }
+                if (!ok) {
+                    logger.error("Could not apply Studio edit for {} (http {})", w.file, r.httpCode);
+                    run->failed++;
+                }
+                ApplyWrite(run, i + 1);
+            });
+        }
+
+        void Download(RunPtr run, std::shared_ptr<std::vector<Item>> queue, size_t i) {
+            if (i >= queue->size()) {
+                SendInventory(run);
+                return;
+            }
+            auto item = (*queue)[i];
+            Get(item.url, "", [run, queue, i, item](Response r) {
+                rapidjson::Document doc;
+                bool ok = false;
+                if (r.IsSuccessful() && r.responseData->size() <= MAX_PLAYLIST_BYTES && ParseJson(r, doc) && IsPlaylist(doc)) {
+                    auto path = PathFor(item.id);
+                    if (writefile(path, *r.responseData)) {
+                        if (auto playlist = PlaylistCore::GetPlaylist(path))
+                            PlaylistCore::MarkPlaylistForReload(playlist);
+                        auto synced = LoadSynced();
+                        synced[item.id] = item.updated;
+                        SaveSynced(synced);
+                        ok = true;
+                    }
+                }
+                if (ok) {
+                    run->written++;
+                    run->changed = true;
+                } else {
+                    logger.error("Could not download playlist {} (http {})", item.id, r.httpCode);
+                    run->failed++;
+                }
+                Download(run, queue, i + 1);
+            });
+        }
+
+        void ApplyItems(RunPtr run) {
+            auto files = OurFiles();
+            auto synced = LoadSynced();
+            std::set<std::string> keep;
+            for (auto const& it : run->items)
+                keep.insert(it.id);
+            // Remove only files this mod wrote that Studio no longer lists.
+            for (auto const& [id, path] : files) {
+                if (!keep.contains(id)) {
+                    RemoveFile(path);
+                    synced.erase(id);
+                    run->removed++;
+                    run->changed = true;
+                }
+            }
+            SaveSynced(synced);
+            auto queue = std::make_shared<std::vector<Item>>();
+            for (auto const& it : run->items) {
+                auto have = synced.find(it.id);
+                if (!files.contains(it.id) || have == synced.end() || have->second != it.updated)
+                    queue->push_back(it);
+            }
+            Download(run, queue, 0);
+        }
+
+        void UploadNeeded(RunPtr run, size_t i) {
+            if (i >= run->need.size()) {
+                Finish(run);
+                return;
+            }
+            auto file = run->need[i];
+            if (!ValidFile(file)) {
+                UploadNeeded(run, i + 1);
+                return;
+            }
+            Post(Server() + "/link/inventory/body?file=" + UrlEncode(file), run->token, readfile(PathIn(file)), [run, i, file](Response r) {
+                if (!r.IsSuccessful())
+                    logger.error("Could not share {} with Studio (http {})", file, r.httpCode);
+                UploadNeeded(run, i + 1);
+            });
+        }
+
+        // Tell Studio which of the headset's own playlists exist; it asks for the ones it lacks.
+        void SendInventory(RunPtr run) {
+            rapidjson::Document body(rapidjson::kObjectType);
+            auto& a = body.GetAllocator();
+            rapidjson::Value list(rapidjson::kArrayType);
+            std::error_code ec;
+            run->shared = 0;
+            for (auto const& entry : std::filesystem::directory_iterator(PlaylistsDir(), ec)) {
+                auto name = entry.path().filename().string();
+                if (!entry.is_regular_file() || name.starts_with(FILE_PREFIX) || !ValidFile(name))
+                    continue;
+                std::error_code sec;
+                if (entry.file_size(sec) > MAX_PLAYLIST_BYTES)
+                    continue;
+                auto text = readfile(entry.path().string());
+                rapidjson::Document doc;
+                if (!ParseText(text, doc) || !IsPlaylist(doc))
+                    continue;
+                rapidjson::Value it(rapidjson::kObjectType);
+                it.AddMember("file", rapidjson::Value(name.c_str(), a), a);
+                it.AddMember("title", rapidjson::Value(GetString(doc, "playlistTitle").c_str(), a), a);
+                it.AddMember("count", (int) doc["songs"].Size(), a);
+                it.AddMember("sha", rapidjson::Value(Fingerprint(text).c_str(), a), a);
+                list.PushBack(it, a);
+                run->shared++;
+            }
+            body.AddMember("items", list, a);
+            Post(Server() + "/link/inventory", run->token, ToJson(body), [run](Response r) {
+                rapidjson::Document doc;
+                if (r.IsSuccessful() && ParseJson(r, doc) && doc.HasMember("need") && doc["need"].IsArray())
+                    for (auto const& v : doc["need"].GetArray())
+                        if (v.IsString())
+                            run->need.push_back(v.GetString());
+                UploadNeeded(run, 0);
+            });
+        }
+
+        // ---- linking ----
+
+        void PollLink(std::string token);
         void ScheduleLinkPoll(std::string token) {
             BSML::MainThreadScheduler::ScheduleAfterTime(LINK_POLL_SECONDS, [token]() { PollLink(token); });
         }
-
         void PollLink(std::string token) {
             if (token != pendingToken)
                 return;  // cancelled or replaced
@@ -178,7 +509,7 @@ namespace StudioSync {
                     SaveSynced({});
                     pendingToken.clear();
                     code.clear();
-                    SetStatus("Linked. Pulling your playlists...");
+                    SetStatus("Linked. Syncing...");
                     SyncNow();
                 } else if (state == "waiting") {
                     ScheduleLinkPoll(token);
@@ -189,73 +520,6 @@ namespace StudioSync {
                 }
             });
         }
-
-        void Finish(bool changed, int written, int removed, int failed, size_t total) {
-            syncing = false;
-            if (changed)
-                PlaylistCore::ReloadPlaylists(false);
-            std::string text = "Synced " + std::to_string(total) + (total == 1 ? " playlist" : " playlists");
-            if (written || removed)
-                text += " (" + std::to_string(written) + " updated, " + std::to_string(removed) + " removed)";
-            if (failed)
-                text += ". " + std::to_string(failed) + " failed, will retry.";
-            SetStatus(text);
-        }
-
-        void Download(std::shared_ptr<std::vector<Item>> queue, size_t index, bool changed, int written, int removed, int failed, size_t total) {
-            if (index >= queue->size()) {
-                Finish(changed, written, removed, failed, total);
-                return;
-            }
-            auto item = (*queue)[index];
-            Get(item.url, "", [=](Response r) {
-                bool ok = false;
-                if (r.IsSuccessful() && r.responseData && r.responseData->size() <= MAX_PLAYLIST_BYTES) {
-                    rapidjson::Document doc;
-                    if (ParseJson(r, doc) && doc.HasMember("songs") && doc["songs"].IsArray()) {
-                        auto path = PathFor(item.id);
-                        if (writefile(path, *r.responseData)) {
-                            if (auto playlist = PlaylistCore::GetPlaylist(path))
-                                PlaylistCore::MarkPlaylistForReload(playlist);
-                            auto synced = LoadSynced();
-                            synced[item.id] = item.updated;
-                            SaveSynced(synced);
-                            ok = true;
-                        }
-                    }
-                }
-                if (!ok)
-                    logger.error("Could not download playlist {} (http {})", item.id, r.httpCode);
-                Download(queue, index + 1, changed || ok, written + (ok ? 1 : 0), removed, failed + (ok ? 0 : 1), total);
-            });
-        }
-
-        void Apply(std::vector<Item> items) {
-            auto files = OurFiles();
-            auto synced = LoadSynced();
-            std::set<std::string> keep;
-            for (auto& it : items)
-                keep.insert(it.id);
-
-            // Remove only files this mod wrote that Studio no longer lists.
-            int removed = 0;
-            for (auto& [id, path] : files) {
-                if (!keep.contains(id)) {
-                    RemoveFile(path);
-                    synced.erase(id);
-                    removed++;
-                }
-            }
-            SaveSynced(synced);
-
-            auto queue = std::make_shared<std::vector<Item>>();
-            for (auto& it : items) {
-                auto have = synced.find(it.id);
-                if (!files.contains(it.id) || have == synced.end() || have->second != it.updated)
-                    queue->push_back(it);
-            }
-            Download(queue, 0, removed > 0, 0, removed, 0, items.size());
-        }
     }
 
     bool IsLinked() {
@@ -263,6 +527,9 @@ namespace StudioSync {
     }
     bool IsLinking() {
         return !pendingToken.empty();
+    }
+    bool IsSyncing() {
+        return syncing;
     }
     std::string const& Code() {
         return code;
@@ -272,6 +539,9 @@ namespace StudioSync {
         if (status.empty())
             return IsLinked() ? linked : unlinked;
         return status;
+    }
+    Summary const& GetSummary() {
+        return summary;
     }
     void SetListener(std::function<void()> l) {
         listener = std::move(l);
@@ -346,9 +616,10 @@ namespace StudioSync {
                 SetStatus("Couldn't reach Playlist Studio (" + r.Describe() + "). Will try again later.");
                 return;
             }
+            auto run = std::make_shared<Run>();
+            run->token = token;
             // Only accept files served by the same Worker, never an arbitrary address.
             auto prefix = Server() + "/p/";
-            std::vector<Item> items;
             for (auto const& v : doc["playlists"].GetArray()) {
                 if (!v.IsObject())
                     continue;
@@ -357,9 +628,13 @@ namespace StudioSync {
                 if (upd != v.MemberEnd() && upd->value.IsNumber())
                     it.updated = upd->value.IsInt64() ? upd->value.GetInt64() : (int64_t) upd->value.GetDouble();
                 if (ValidId(it.id) && it.url == prefix + it.id + ".bplist")
-                    items.push_back(std::move(it));
+                    run->items.push_back(std::move(it));
             }
-            Apply(std::move(items));
+            if (doc.HasMember("writes") && doc["writes"].IsArray())
+                for (auto const& v : doc["writes"].GetArray())
+                    if (v.IsObject())
+                        run->writes.push_back({GetString(v, "id"), GetString(v, "file"), GetString(v, "url")});
+            ApplyWrite(run, 0);
         });
     }
 }
