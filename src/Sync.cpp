@@ -43,13 +43,15 @@ namespace StudioSync {
         struct Write {
             std::string id, file, url;
             bool create = false;  // a new playlist Studio made for this headset
+            int64_t restore = 0;  // put back the backup taken at this time instead of downloading
+            std::string savedAs;  // set when a new playlist had to take another name
         };
         // One sync from start to finish; each step hands it to the next.
         struct Run {
             std::string token;
             std::vector<Item> items;
             std::vector<Write> writes;
-            std::vector<std::string> edited, created;
+            std::vector<std::string> edited, created, restored;
             std::vector<std::string> need;
             bool changed = false;
             int written = 0, removed = 0, failed = 0, shared = 0, total = 0;
@@ -228,9 +230,13 @@ namespace StudioSync {
 
         // ---- backups and merging for edits sent back from Studio ----
 
+        std::filesystem::path BackupDir() {
+            return std::filesystem::path(getDataDir(std::string_view("StudioSync"))) / "backups";
+        }
+
         void Backup(std::string const& file, std::string const& original) {
             std::error_code ec;
-            auto dir = std::filesystem::path(getDataDir(std::string_view("StudioSync"))) / "backups";
+            auto dir = BackupDir();
             std::filesystem::create_directories(dir, ec);
             writefile((dir / (file + "." + std::to_string(std::time(nullptr)) + ".bak")).string(), original);
             // Keep only the newest few backups of each playlist.
@@ -243,6 +249,61 @@ namespace StudioSync {
                 std::filesystem::remove(mine.front(), ec);
                 mine.erase(mine.begin());
             }
+        }
+
+        struct BackupInfo {
+            int64_t time = 0;
+            int count = -1;
+        };
+        // Every playlist's backups, newest first, keyed by playlist file name.
+        std::map<std::string, std::vector<BackupInfo>> AllBackups() {
+            std::map<std::string, std::vector<BackupInfo>> out;
+            std::error_code ec;
+            for (auto const& e : std::filesystem::directory_iterator(BackupDir(), ec)) {
+                auto name = e.path().filename().string();
+                if (!e.is_regular_file() || !name.ends_with(".bak"))
+                    continue;
+                auto stem = name.substr(0, name.size() - 4);
+                auto dot = stem.rfind('.');
+                if (dot == std::string::npos || dot + 1 >= stem.size())
+                    continue;
+                auto digits = stem.substr(dot + 1);
+                if (!std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isdigit(c); }) || digits.size() > 12)
+                    continue;
+                BackupInfo info;
+                info.time = std::strtoll(digits.c_str(), nullptr, 10);
+                rapidjson::Document doc;
+                std::error_code sec;
+                if (e.file_size(sec) <= MAX_PLAYLIST_BYTES && ParseText(readfile(e.path().string()), doc) && IsPlaylist(doc))
+                    info.count = (int) doc["songs"].Size();
+                out[stem.substr(0, dot)].push_back(info);
+            }
+            for (auto& [file, list] : out)
+                std::sort(list.begin(), list.end(), [](auto const& a, auto const& b) { return a.time > b.time; });
+            return out;
+        }
+
+        // "Poodles.bplist" is taken: "Poodles (2).bplist", then (3) and so on.
+        std::string FreeName(std::string const& file) {
+            auto dot = file.rfind('.');
+            auto stem = file.substr(0, dot), ext = file.substr(dot);
+            std::error_code ec;
+            for (int n = 2; n < 1000; n++) {
+                auto name = stem + " (" + std::to_string(n) + ")" + ext;
+                if (!std::filesystem::exists(PathIn(name), ec))
+                    return name;
+            }
+            return "";
+        }
+
+        void Ack(RunPtr run, std::string const& id, std::string const& savedAs = "") {
+            std::string body = "{}";
+            if (!savedAs.empty()) {
+                rapidjson::Document d(rapidjson::kObjectType);
+                d.AddMember("file", rapidjson::Value(savedAs.c_str(), d.GetAllocator()), d.GetAllocator());
+                body = ToJson(d);
+            }
+            Post(Server() + "/link/outbox/" + id + "/ack", run->token, body, [](Response) {});
         }
 
         std::string HashOf(rapidjson::Value const& song) {
@@ -322,11 +383,12 @@ namespace StudioSync {
                 summary.fromStudio.push_back(it.title.empty() ? it.id : it.title);
             summary.editedLast = run->edited;
             summary.addedLast = run->created;
+            summary.restoredLast = run->restored;
             summary.shared = run->shared;
             summary.total = run->total;
             summary.lastSync = LocalTimeNow();
             std::string text = "Up to date";
-            if (run->written || run->removed || !run->edited.empty() || !run->created.empty()) {
+            if (run->written || run->removed || !run->edited.empty() || !run->created.empty() || !run->restored.empty()) {
                 text = "Synced";
                 if (!run->created.empty())
                     text += ", " + std::to_string(run->created.size()) + " added";
@@ -334,6 +396,8 @@ namespace StudioSync {
                     text += ", " + std::to_string(run->written) + " downloaded";
                 if (!run->edited.empty())
                     text += ", " + std::to_string(run->edited.size()) + " edited";
+                if (!run->restored.empty())
+                    text += ", " + std::to_string(run->restored.size()) + " restored";
                 if (run->removed)
                     text += ", " + std::to_string(run->removed) + " removed";
             }
@@ -348,21 +412,57 @@ namespace StudioSync {
                 return;
             }
             auto w = run->writes[i];
-            auto path = PathIn(w.file);
             std::error_code ec;
-            bool exists = std::filesystem::exists(path, ec);
-            if (!ValidFile(w.file) || w.file.starts_with(FILE_PREFIX) || w.url != Server() + "/link/outbox/" + w.id || (!w.create && !exists)) {
+            if (!ValidFile(w.file) || w.file.starts_with(FILE_PREFIX) || w.url != Server() + "/link/outbox/" + w.id) {
                 run->failed++;
                 ApplyWrite(run, i + 1);
                 return;
             }
-            // A new playlist never overwrites a file that's already there; drop it instead of retrying forever.
-            if (w.create && exists) {
-                logger.warn("Studio asked to create {} but it already exists; skipping", w.file);
-                Post(Server() + "/link/outbox/" + w.id + "/ack", run->token, "{}", [](Response) {});
+            bool exists = std::filesystem::exists(PathIn(w.file), ec);
+            if (!w.create && !exists) {
+                // The playlist was deleted on the headset; nothing to edit or restore.
+                logger.warn("Studio sent a change for {} but it's gone; dropping it", w.file);
+                Ack(run, w.id);
                 ApplyWrite(run, i + 1);
                 return;
             }
+            if (w.restore > 0) {
+                auto bak = BackupDir() / (w.file + "." + std::to_string(w.restore) + ".bak");
+                auto text = readfile(bak.string());
+                rapidjson::Document doc;
+                if (text.empty() || !ParseText(text, doc) || !IsPlaylist(doc)) {
+                    logger.warn("Backup of {} from {} is gone; dropping the restore", w.file, w.restore);
+                    Ack(run, w.id);
+                    ApplyWrite(run, i + 1);
+                    return;
+                }
+                auto path = PathIn(w.file);
+                // The version being replaced becomes a backup too, so a restore can be undone.
+                Backup(w.file, readfile(path));
+                if (writefile(path, text)) {
+                    if (auto playlist = PlaylistCore::GetPlaylist(path))
+                        PlaylistCore::MarkPlaylistForReload(playlist);
+                    auto title = GetString(doc, "playlistTitle");
+                    run->restored.push_back(title.empty() ? w.file : title);
+                    run->changed = true;
+                    Ack(run, w.id);
+                } else
+                    run->failed++;
+                ApplyWrite(run, i + 1);
+                return;
+            }
+            // A new playlist never overwrites one that's there: it takes the next free "(2)" name.
+            if (w.create && exists) {
+                auto name = FreeName(w.file);
+                if (name.empty()) {
+                    run->failed++;
+                    ApplyWrite(run, i + 1);
+                    return;
+                }
+                logger.info("{} already exists; saving Studio's new playlist as {}", w.file, name);
+                w.savedAs = name;
+            }
+            auto path = PathIn(w.savedAs.empty() ? w.file : w.savedAs);
             Get(w.url, run->token, [run, i, w, path](Response r) {
                 rapidjson::Document edit;
                 bool ok = false;
@@ -382,7 +482,7 @@ namespace StudioSync {
                         (w.create ? run->created : run->edited).push_back(title);
                         run->changed = true;
                         ok = true;
-                        Post(Server() + "/link/outbox/" + w.id + "/ack", run->token, "{}", [](Response) {});
+                        Ack(run, w.id, w.savedAs);
                     }
                 }
                 if (!ok) {
@@ -474,6 +574,7 @@ namespace StudioSync {
             std::error_code ec;
             run->shared = 0;
             run->total = 0;
+            auto backups = AllBackups();
             for (auto const& entry : std::filesystem::directory_iterator(PlaylistsDir(), ec)) {
                 auto name = entry.path().filename().string();
                 if (!entry.is_regular_file() || name.starts_with(FILE_PREFIX) || !ValidFile(name))
@@ -493,6 +594,16 @@ namespace StudioSync {
                 it.AddMember("title", rapidjson::Value(GetString(doc, "playlistTitle").c_str(), a), a);
                 it.AddMember("count", (int) doc["songs"].Size(), a);
                 it.AddMember("sha", rapidjson::Value(Fingerprint(text).c_str(), a), a);
+                // Backups Studio can offer to restore.
+                rapidjson::Value baks(rapidjson::kArrayType);
+                if (auto found = backups.find(name); found != backups.end())
+                    for (auto const& b : found->second) {
+                        rapidjson::Value bv(rapidjson::kObjectType);
+                        bv.AddMember("t", b.time, a);
+                        bv.AddMember("count", b.count, a);
+                        baks.PushBack(bv, a);
+                    }
+                it.AddMember("backups", baks, a);
                 list.PushBack(it, a);
                 run->shared++;
             }
@@ -697,8 +808,12 @@ namespace StudioSync {
             }
             if (doc.HasMember("writes") && doc["writes"].IsArray())
                 for (auto const& v : doc["writes"].GetArray())
-                    if (v.IsObject())
-                        run->writes.push_back({GetString(v, "id"), GetString(v, "file"), GetString(v, "url"), v.HasMember("create") && v["create"].IsBool() && v["create"].GetBool()});
+                    if (v.IsObject()) {
+                        Write w{GetString(v, "id"), GetString(v, "file"), GetString(v, "url"), v.HasMember("create") && v["create"].IsBool() && v["create"].GetBool()};
+                        if (v.HasMember("restore") && v["restore"].IsInt64())
+                            w.restore = v["restore"].GetInt64();
+                        run->writes.push_back(std::move(w));
+                    }
             ApplyWrite(run, 0);
         });
     }

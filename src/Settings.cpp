@@ -64,6 +64,11 @@ namespace {
             for (size_t i = 0; i < s.editedLast.size() && i < MAX_LISTED; i++)
                 out += "  " + s.editedLast[i] + "\n";
         }
+        if (!s.restoredLast.empty()) {
+            out += "<b>Restored from a backup</b>\n";
+            for (size_t i = 0; i < s.restoredLast.size() && i < MAX_LISTED; i++)
+                out += "  " + s.restoredLast[i] + "\n";
+        }
         out += "<color=#9aa4b2>Sharing " + std::to_string(s.shared) + " of your " + std::to_string(s.total) + " playlists with Studio";
         if (!s.lastSync.empty())
             out += " · last sync " + s.lastSync;
