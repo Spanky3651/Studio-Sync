@@ -1,6 +1,6 @@
 # Studio Sync
 
-A Beat Saber Quest mod that links your headset to [Playlist Studio](https://spanky3651.github.io/Playlist-Studio/). Hosted playlists you tick in Studio show up in game on their own and stay updated. No file to load, no Sync button.
+A Beat Saber Quest mod that links your headset to [Playlist Studio](https://spanky3651.github.io/Playlist-Studio/). Playlists you send from Studio land on your headset, and the playlists already on your headset show up in Studio so you can edit them and send them back. No file to load.
 
 Built for Beat Saber **1.40.8** (Scotland2). Needs **PlaylistCore** and **BSML**, which mod managers install with it.
 
@@ -15,6 +15,15 @@ The headset syncs when the game starts, each time you return to the main menu (a
 - still pulls playlists linked the older hosted way, until you move them onto the headset from Studio,
 - shares your own playlists with Studio, so **On your Quest** lists them with an **Edit** button (choose which ones under **Sharing...**; switched-off playlists are never uploaded and their stored copy is deleted),
 - applies edits you sent back from Studio, replacing that playlist and keeping a backup.
+
+## In game
+Studio Sync lives in the **Mods** tab beside song select, next to mods like ReeSabers.
+
+![Studio Sync tab in the Mods panel, linked and up to date](docs/tab.jpg)
+
+**Sharing...** opens the list of your playlists. Switch off any you don't want Studio to see.
+
+![Sharing list with a switch for each headset playlist](docs/sharing.jpg)
 
 ## What it touches
 - Studio-sent playlists are its own `StudioSync_<id>.bplist` files in `ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists`; only those are ever deleted.
