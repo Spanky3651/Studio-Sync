@@ -10,4 +10,6 @@ DECLARE_CONFIG(Config) {
     CONFIG_VALUE(Token, std::string, "token", "");
     // "id=updated" for every playlist written to the headset
     CONFIG_VALUE(Synced, std::vector<std::string>, "synced", std::vector<std::string>{});
+    // headset playlist files the player chose not to share with Studio
+    CONFIG_VALUE(Excluded, std::vector<std::string>, "excluded", std::vector<std::string>{});
 };

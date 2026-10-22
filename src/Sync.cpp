@@ -51,7 +51,7 @@ namespace StudioSync {
             std::vector<std::string> edited;
             std::vector<std::string> need;
             bool changed = false;
-            int written = 0, removed = 0, failed = 0, shared = 0;
+            int written = 0, removed = 0, failed = 0, shared = 0, total = 0;
         };
         using RunPtr = std::shared_ptr<Run>;
 
@@ -302,6 +302,11 @@ namespace StudioSync {
             return ToJson(out);
         }
 
+        bool Excluded(std::string const& file) {
+            auto const& list = getConfig().Excluded.GetValue();
+            return std::find(list.begin(), list.end(), file) != list.end();
+        }
+
         // ---- the sync pipeline: edits -> Studio playlists -> inventory -> finish ----
 
         void ApplyItems(RunPtr run);
@@ -316,6 +321,7 @@ namespace StudioSync {
                 summary.fromStudio.push_back(it.title.empty() ? it.id : it.title);
             summary.editedLast = run->edited;
             summary.shared = run->shared;
+            summary.total = run->total;
             summary.lastSync = LocalTimeNow();
             std::string text = "Up to date";
             if (run->written || run->removed || !run->edited.empty()) {
@@ -450,9 +456,13 @@ namespace StudioSync {
             rapidjson::Value list(rapidjson::kArrayType);
             std::error_code ec;
             run->shared = 0;
+            run->total = 0;
             for (auto const& entry : std::filesystem::directory_iterator(PlaylistsDir(), ec)) {
                 auto name = entry.path().filename().string();
                 if (!entry.is_regular_file() || name.starts_with(FILE_PREFIX) || !ValidFile(name))
+                    continue;
+                run->total++;
+                if (Excluded(name))
                     continue;
                 std::error_code sec;
                 if (entry.file_size(sec) > MAX_PLAYLIST_BYTES)
@@ -545,6 +555,44 @@ namespace StudioSync {
     }
     void SetListener(std::function<void()> l) {
         listener = std::move(l);
+    }
+
+    std::vector<HeadsetPlaylist> HeadsetPlaylists() {
+        std::vector<HeadsetPlaylist> out;
+        std::error_code ec;
+        for (auto const& entry : std::filesystem::directory_iterator(PlaylistsDir(), ec)) {
+            auto name = entry.path().filename().string();
+            if (!entry.is_regular_file() || name.starts_with(FILE_PREFIX) || !ValidFile(name))
+                continue;
+            std::error_code sec;
+            if (entry.file_size(sec) > MAX_PLAYLIST_BYTES)
+                continue;
+            rapidjson::Document doc;
+            if (!ParseText(readfile(entry.path().string()), doc) || !IsPlaylist(doc))
+                continue;
+            auto title = GetString(doc, "playlistTitle");
+            out.push_back({name, title.empty() ? name : title, (int) doc["songs"].Size(), !Excluded(name)});
+        }
+        std::sort(out.begin(), out.end(), [](auto const& a, auto const& b) { return a.title < b.title; });
+        return out;
+    }
+
+    void SetShared(std::string const& file, bool shared) {
+        auto list = getConfig().Excluded.GetValue();
+        list.erase(std::remove(list.begin(), list.end(), file), list.end());
+        if (!shared)
+            list.push_back(file);
+        getConfig().Excluded.SetValue(list);
+        Notify();
+    }
+
+    void SetAllShared(bool shared) {
+        std::vector<std::string> list;
+        if (!shared)
+            for (auto const& p : HeadsetPlaylists())
+                list.push_back(p.file);
+        getConfig().Excluded.SetValue(list);
+        Notify();
     }
 
     void StartLink() {

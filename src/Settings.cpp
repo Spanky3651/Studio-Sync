@@ -7,9 +7,12 @@
 
 #include "bsml/shared/BSML-Lite.hpp"
 #include "bsml/shared/BSML.hpp"
+#include "bsml/shared/BSML/Components/ModalView.hpp"
 
 #include "HMUI/CurvedTextMeshPro.hpp"
 #include "UnityEngine/GameObject.hpp"
+#include "UnityEngine/Object.hpp"
+#include "UnityEngine/Transform.hpp"
 #include "UnityEngine/RectTransform.hpp"
 #include "UnityEngine/TextAnchor.hpp"
 #include "UnityEngine/UI/Button.hpp"
@@ -25,6 +28,10 @@ namespace {
     UnityW<HMUI::CurvedTextMeshPro> statusText, codeText, detailText;
     UnityW<UnityEngine::UI::Button> linkButton, cancelButton, syncButton, unlinkButton;
     UnityW<UnityEngine::GameObject> linkedRow;
+    UnityW<BSML::ModalView> shareModal;
+    UnityW<UnityEngine::Transform> shareList;
+    UnityW<HMUI::CurvedTextMeshPro> shareCount;
+    bool shareChanged = false;
     std::chrono::steady_clock::time_point unlinkArmed{};
 
     void Show(UnityW<UnityEngine::UI::Button> button, bool on) {
@@ -49,7 +56,7 @@ namespace {
             for (size_t i = 0; i < s.editedLast.size() && i < MAX_LISTED; i++)
                 out += "  " + s.editedLast[i] + "\n";
         }
-        out += "<color=#9aa4b2>" + std::to_string(s.shared) + " of your playlists can be edited in Studio";
+        out += "<color=#9aa4b2>Sharing " + std::to_string(s.shared) + " of your " + std::to_string(s.total) + " playlists with Studio";
         if (!s.lastSync.empty())
             out += " · last sync " + s.lastSync;
         out += "</color>";
@@ -73,6 +80,83 @@ namespace {
             linkedRow->SetActive(linked && !linking);
         if (syncButton)
             syncButton->set_interactable(!IsSyncing());
+    }
+
+    // ---- choose which headset playlists Studio can see ----
+    std::string Shorten(std::string const& t, size_t n) {
+        return t.size() <= n ? t : t.substr(0, n - 1) + "...";
+    }
+
+    void UpdateShareCount() {
+        if (!shareCount)
+            return;
+        int on = 0, all = 0;
+        for (auto const& p : HeadsetPlaylists()) {
+            all++;
+            on += p.shared ? 1 : 0;
+        }
+        shareCount->set_text("Sharing " + std::to_string(on) + " of " + std::to_string(all) + ". Studio can only see and edit the ones switched on.");
+    }
+
+    void FillShareList() {
+        if (!shareList)
+            return;
+        for (int i = shareList->get_childCount() - 1; i >= 0; i--)
+            UnityEngine::Object::Destroy(shareList->GetChild(i)->get_gameObject());
+        auto list = HeadsetPlaylists();
+        if (list.empty())
+            BSML::Lite::CreateText(shareList.ptr(), "No playlists of your own on this headset yet.", TMPro::FontStyles::Italic, 3.5);
+        for (auto const& p : list) {
+            auto file = p.file;
+            BSML::Lite::CreateToggle(shareList.ptr(), Shorten(p.title, 34) + " (" + std::to_string(p.count) + ")", p.shared, [file](bool on) {
+                SetShared(file, on);
+                shareChanged = true;
+                UpdateShareCount();
+            });
+        }
+        UpdateShareCount();
+    }
+
+    // Runs when the modal closes, from Done or from tapping outside it.
+    void ShareClosed() {
+        // Push the new choice right away so Studio drops or picks up those playlists.
+        if (shareChanged && IsLinked()) {
+            shareChanged = false;
+            SyncNow();
+        }
+    }
+
+    void BuildShareModal(UnityEngine::Transform* parent) {
+        auto modal = BSML::Lite::CreateModal(parent, {95, 70}, [] { ShareClosed(); }, true);
+        shareModal = modal;
+        auto content = BSML::Lite::CreateScrollableModalContainer(modal)->get_transform();
+        BSML::Lite::CreateText(content, "Share with Playlist Studio", TMPro::FontStyles::Bold, 4.5);
+        shareCount = BSML::Lite::CreateText(content, "", TMPro::FontStyles::Normal, 3);
+        auto row = BSML::Lite::CreateHorizontalLayoutGroup(content);
+        row->set_spacing(2.0f);
+        row->set_childForceExpandWidth(false);
+        row->set_childAlignment(UnityEngine::TextAnchor::MiddleCenter);
+        BSML::Lite::CreateUIButton(row->get_transform(), "Share all", [] { SetAllShared(true); shareChanged = true; FillShareList(); });
+        BSML::Lite::CreateUIButton(row->get_transform(), "Share none", [] { SetAllShared(false); shareChanged = true; FillShareList(); });
+        BSML::Lite::CreateUIButton(row->get_transform(), "Done", [] {
+            if (shareModal)
+                shareModal->Hide();
+            ShareClosed();
+        });
+        // Toggles live in their own group so refilling doesn't touch the header.
+        auto list = BSML::Lite::CreateVerticalLayoutGroup(content);
+        list->set_childControlHeight(true);
+        list->set_childForceExpandHeight(false);
+        list->set_spacing(0.5f);
+        shareList = list->get_transform();
+    }
+
+    void OpenShare() {
+        if (!shareModal)
+            return;
+        shareChanged = false;
+        FillShareList();
+        shareModal->Show();
     }
 
     void PressUnlink() {
@@ -124,10 +208,13 @@ namespace {
         auto sync = BSML::Lite::CreateUIButton(row->get_transform(), "Sync now", [] { SyncNow(); });
         BSML::Lite::AddHoverHint(sync, "Pull playlists and edits from Studio and share your playlists with it");
         syncButton = sync;
+        auto share = BSML::Lite::CreateUIButton(row->get_transform(), "Sharing...", [] { OpenShare(); });
+        BSML::Lite::AddHoverHint(share, "Choose which of your playlists Playlist Studio can see and edit");
         auto unlink = BSML::Lite::CreateUIButton(row->get_transform(), "Unlink", [] { PressUnlink(); });
         BSML::Lite::AddHoverHint(unlink, "Stops syncing. Playlists already here stay.");
         unlinkButton = unlink;
 
+        BuildShareModal(tab->get_transform());
         SetListener(Refresh);
     }
 
