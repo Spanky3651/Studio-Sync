@@ -50,7 +50,7 @@
     },
     {
       "id": "scotland2",
-      "versionRange": "=0.1.6",
+      "versionRange": "^0.1.6",
       "additionalData": {
         "includeQmod": false
       }
@@ -62,7 +62,7 @@
     },
     {
       "id": "paper2_scotland2",
-      "versionRange": "=4.6.4",
+      "versionRange": "^4.6.4",
       "additionalData": {}
     },
     {
@@ -72,7 +72,7 @@
     },
     {
       "id": "bsml",
-      "versionRange": "=0.4.55",
+      "versionRange": "^0.4.55",
       "additionalData": {}
     },
     {
@@ -87,17 +87,17 @@
     },
     {
       "id": "web-utils",
-      "versionRange": "=0.6.8",
+      "versionRange": "^0.6.8",
       "additionalData": {}
     },
     {
       "id": "songcore",
-      "versionRange": "=1.1.26",
+      "versionRange": "~1.1.26",
       "additionalData": {}
     },
     {
       "id": "playlistcore",
-      "versionRange": "=1.5.5",
+      "versionRange": "~1.5.5",
       "additionalData": {}
     }
   ]
