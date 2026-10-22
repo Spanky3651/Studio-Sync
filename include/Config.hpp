@@ -12,4 +12,6 @@ DECLARE_CONFIG(Config) {
     CONFIG_VALUE(Synced, std::vector<std::string>, "synced", std::vector<std::string>{});
     // headset playlist files the player chose not to share with Studio
     CONFIG_VALUE(Excluded, std::vector<std::string>, "excluded", std::vector<std::string>{});
+    // download songs the player doesn't have for playlists Studio sends, edits or restores
+    CONFIG_VALUE(AutoDownload, bool, "autoDownload", true);
 };

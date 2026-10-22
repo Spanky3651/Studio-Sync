@@ -15,6 +15,8 @@ namespace StudioSync {
         int shared = 0;                       // headset playlists visible in Studio
         int total = 0;                        // all of the player's own playlists
         std::string lastSync;                 // local time of the last good sync, e.g. "8:31 AM"
+        int downloadedLast = 0;               // songs downloaded after the last sync
+        int notFoundLast = 0;                 // songs that couldn't be downloaded (gone from BeatSaver)
     };
 
     // One of the player's own playlists on the headset.
@@ -27,7 +29,10 @@ namespace StudioSync {
     // All of these run on the main thread.
     bool IsLinked();
     bool IsLinking();
-    bool IsSyncing();
+    bool IsSyncing();  // also true while songs are downloading
+    bool IsDownloading();
+    bool AutoDownload();
+    void SetAutoDownload(bool on);
     std::string const& Code();
     std::string const& Status();
     Summary const& GetSummary();

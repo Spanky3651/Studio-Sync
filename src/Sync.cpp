@@ -22,6 +22,7 @@
 #include "beatsaber-hook/shared/utils/utils.h"
 #include "bsml/shared/BSML/MainThreadScheduler.hpp"
 #include "playlistcore/shared/PlaylistCore.hpp"
+#include "songcore/shared/SongCore.hpp"
 
 namespace StudioSync {
     namespace {
@@ -55,6 +56,7 @@ namespace StudioSync {
             std::vector<Item> items;
             std::vector<Write> writes;
             std::vector<std::string> edited, created, restored, deleted;
+            std::vector<std::string> touched;  // playlist paths written this sync, checked for missing songs
             std::vector<std::string> need;
             bool changed = false;
             int written = 0, removed = 0, failed = 0, shared = 0, total = 0;
@@ -63,7 +65,7 @@ namespace StudioSync {
 
         std::string pendingToken, code, status;
         std::chrono::steady_clock::time_point linkStarted, lastSync{};
-        bool syncing = false;
+        bool syncing = false, downloading = false;
         Summary summary;
         std::function<void()> listener;
 
@@ -381,6 +383,103 @@ namespace StudioSync {
         void ApplyItems(RunPtr run);
         void SendInventory(RunPtr run);
 
+        // ---- downloading songs a synced playlist needs ----
+        // PlaylistCore does the BeatSaver lookups and installs (the same code as PlaylistManager's
+        // download button); SongCore then rescans so the new maps show up in the playlist.
+
+        struct DownloadJob {
+            std::vector<std::string> paths;
+            std::string base;  // the sync's own status, kept in front of the download progress
+            size_t i = 0;
+            int waits = 0, wanted = 0;
+        };
+        using JobPtr = std::shared_ptr<DownloadJob>;
+
+        int MissingIn(std::vector<std::string> const& paths) {
+            int n = 0;
+            for (auto const& path : paths)
+                if (auto p = PlaylistCore::GetPlaylist(path); p && p->playlistCS)
+                    n += PlaylistCore::PlaylistHasMissingSongs(p);
+            return n;
+        }
+
+        void DownloadsDone(JobPtr job) {
+            if (job->wanted == 0) {
+                downloading = false;
+                Notify();
+                return;
+            }
+            SetStatus(job->base + ". Loading new songs...");
+            auto refresh = SongCore::API::Loading::RefreshSongs(false);
+            // Wait for SongCore's rescan, then give PlaylistCore a moment to rebuild the playlists.
+            BSML::MainThreadScheduler::ScheduleUntil(
+                [refresh]() { return refresh.wait_for(std::chrono::seconds(0)) == std::future_status::ready; },
+                [job]() {
+                    BSML::MainThreadScheduler::ScheduleAfterTime(1.5f, [job]() {
+                        int left = std::min(job->wanted, MissingIn(job->paths));
+                        summary.downloadedLast = job->wanted - left;
+                        summary.notFoundLast = left;
+                        std::string text = job->base + ", " + std::to_string(summary.downloadedLast) + " song" + (summary.downloadedLast == 1 ? "" : "s") + " downloaded";
+                        if (left)
+                            text += ". " + std::to_string(left) + " couldn't be found on BeatSaver";
+                        downloading = false;
+                        SetStatus(text);
+                    });
+                });
+        }
+
+        void DownloadNext(JobPtr job) {
+            if (job->i >= job->paths.size()) {
+                DownloadsDone(job);
+                return;
+            }
+            auto playlist = PlaylistCore::GetPlaylist(job->paths[job->i]);
+            if (!playlist || !playlist->playlistCS) {
+                // A playlist written this sync can take a moment to load; skip it after ~10 seconds.
+                if (++job->waits <= 10) {
+                    BSML::MainThreadScheduler::ScheduleAfterTime(1.0f, [job]() { DownloadNext(job); });
+                    return;
+                }
+                job->waits = 0;
+                job->i++;
+                DownloadNext(job);
+                return;
+            }
+            job->waits = 0;
+            int missing = PlaylistCore::PlaylistHasMissingSongs(playlist);
+            if (missing <= 0) {
+                job->i++;
+                DownloadNext(job);
+                return;
+            }
+            job->wanted += missing;
+            std::string name = playlist->name;
+            PlaylistCore::DownloadMissingSongsFromPlaylist(
+                playlist,
+                [job, playlist]() {
+                    PlaylistCore::MarkPlaylistForReload(playlist);
+                    job->i++;
+                    DownloadNext(job);
+                },
+                [job, name](int total, int done) {
+                    SetStatus("Downloading songs for " + name + ": " + std::to_string(done) + " of " + std::to_string(total));
+                });
+        }
+
+        void StartDownloads(std::vector<std::string> paths, std::string base) {
+            if (downloading)
+                return;
+            std::sort(paths.begin(), paths.end());
+            paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+            auto job = std::make_shared<DownloadJob>();
+            job->paths = std::move(paths);
+            job->base = std::move(base);
+            downloading = true;
+            Notify();
+            // Let PlaylistCore finish loading what this sync just wrote.
+            BSML::MainThreadScheduler::ScheduleAfterTime(1.0f, [job]() { DownloadNext(job); });
+        }
+
         void Finish(RunPtr run) {
             syncing = false;
             if (run->changed)
@@ -413,7 +512,10 @@ namespace StudioSync {
             }
             if (run->failed)
                 text += ". " + std::to_string(run->failed) + " failed, will retry.";
+            summary.downloadedLast = summary.notFoundLast = 0;
             SetStatus(text);
+            if (getConfig().AutoDownload.GetValue() && !run->touched.empty())
+                StartDownloads(run->touched, text);
         }
 
         void ApplyWrite(RunPtr run, size_t i) {
@@ -480,6 +582,7 @@ namespace StudioSync {
                         PlaylistCore::MarkPlaylistForReload(playlist);
                     auto title = GetString(doc, "playlistTitle");
                     run->restored.push_back(title.empty() ? w.file : title);
+                    run->touched.push_back(path);
                     run->changed = true;
                     Ack(run, w.id);
                 } else
@@ -516,6 +619,7 @@ namespace StudioSync {
                             PlaylistCore::MarkPlaylistForReload(playlist);
                         auto title = GetString(edit, "playlistTitle").empty() ? w.file : GetString(edit, "playlistTitle");
                         (w.create ? run->created : run->edited).push_back(title);
+                        run->touched.push_back(path);
                         run->changed = true;
                         ok = true;
                         Ack(run, w.id, w.savedAs);
@@ -744,7 +848,17 @@ namespace StudioSync {
         return !pendingToken.empty();
     }
     bool IsSyncing() {
-        return syncing;
+        return syncing || downloading;
+    }
+    bool IsDownloading() {
+        return downloading;
+    }
+    bool AutoDownload() {
+        return getConfig().AutoDownload.GetValue();
+    }
+    void SetAutoDownload(bool on) {
+        getConfig().AutoDownload.SetValue(on);
+        Notify();
     }
     std::string const& Code() {
         return code;
@@ -840,7 +954,8 @@ namespace StudioSync {
 
     void SyncNow(int minGapSeconds) {
         auto token = getConfig().Token.GetValue();
-        if (token.empty() || syncing)
+        // A sync waits for songs still downloading from the last one.
+        if (token.empty() || syncing || downloading)
             return;
         auto now = std::chrono::steady_clock::now();
         if (minGapSeconds > 0 && lastSync.time_since_epoch().count() != 0 && now - lastSync < std::chrono::seconds(minGapSeconds))

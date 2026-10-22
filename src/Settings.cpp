@@ -30,7 +30,7 @@ namespace {
 
     UnityW<HMUI::CurvedTextMeshPro> statusText, codeText, detailText;
     UnityW<UnityEngine::UI::Button> linkButton, cancelButton, syncButton, unlinkButton;
-    UnityW<UnityEngine::GameObject> linkedRow;
+    UnityW<UnityEngine::GameObject> linkedRow, downloadToggle;
     UnityW<BSML::ModalView> shareModal;
     UnityW<UnityEngine::Transform> shareList;
     std::vector<UnityW<UnityEngine::GameObject>> shareRows;
@@ -96,6 +96,8 @@ namespace {
         Show(cancelButton, linking);
         if (linkedRow)
             linkedRow->SetActive(linked && !linking);
+        if (downloadToggle)
+            downloadToggle->SetActive(linked && !linking);
         if (syncButton)
             syncButton->set_interactable(!IsSyncing());
     }
@@ -252,6 +254,10 @@ namespace {
         auto unlink = BSML::Lite::CreateUIButton(row->get_transform(), "Unlink", [] { PressUnlink(); });
         BSML::Lite::AddHoverHint(unlink, "Stops syncing. Playlists already here stay.");
         unlinkButton = unlink;
+
+        auto dl = Sized(BSML::Lite::CreateToggle(parent, "Download missing songs", AutoDownload(), [](bool on) { SetAutoDownload(on); }), 7.0f);
+        BSML::Lite::AddHoverHint(dl, "Downloads songs you don't have for playlists Studio sends, edits or restores");
+        downloadToggle = dl->get_gameObject();
 
         BuildShareModal(tab->get_transform());
         SetListener(Refresh);
