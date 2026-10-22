@@ -13,5 +13,10 @@
     "${binary}"
   ],
   "libraryFiles": [],
-  "fileCopies": []
+  "fileCopies": [
+    {
+      "name": "cacert.pem",
+      "destination": "/sdcard/ModData/com.beatgames.beatsaber/Mods/StudioSync/cacert.pem"
+    }
+  ]
 }

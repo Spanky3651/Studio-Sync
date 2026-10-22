@@ -70,6 +70,15 @@ foreach ($lib in $modJson.libraryFiles) {
     $filelist += $path
 }
 
+foreach ($copy in $modJson.fileCopies) {
+    $path = "./" + $copy.name
+    if (-not (Test-Path $path)) {
+        Write-Output "Error: could not find file copy: $path"
+        exit 1
+    }
+    $filelist += $path
+}
+
 $zip = $qmodName + ".zip"
 $qmod = $qmodName + ".qmod"
 

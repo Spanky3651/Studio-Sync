@@ -86,11 +86,6 @@
       "additionalData": {}
     },
     {
-      "id": "web-utils",
-      "versionRange": "^0.6.8",
-      "additionalData": {}
-    },
-    {
       "id": "songcore",
       "versionRange": "~1.1.26",
       "additionalData": {}
@@ -98,6 +93,11 @@
     {
       "id": "playlistcore",
       "versionRange": "~1.5.5",
+      "additionalData": {}
+    },
+    {
+      "id": "libcurl",
+      "versionRange": "=8.5.0",
       "additionalData": {}
     }
   ]

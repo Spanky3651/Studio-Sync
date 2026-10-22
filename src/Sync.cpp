@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "Config.hpp"
+#include "Http.hpp"
 #include "main.hpp"
 
 #include "beatsaber-hook/shared/config/config-utils.hpp"
@@ -19,7 +20,6 @@
 #include "beatsaber-hook/shared/utils/utils.h"
 #include "bsml/shared/BSML/MainThreadScheduler.hpp"
 #include "playlistcore/shared/PlaylistCore.hpp"
-#include "web-utils/shared/WebUtils.hpp"
 
 namespace StudioSync {
     namespace {
@@ -83,30 +83,17 @@ namespace StudioSync {
             return t;
         }
 
-        WebUtils::URLOptions Options(std::string const& url, std::string const& token, WebUtils::URLOptions::QueryMap query = {}) {
-            WebUtils::URLOptions::HeaderMap headers = {{"Content-Type", "application/json"}};
-            if (!token.empty())
-                headers["Authorization"] = "Bearer " + token;
-            // useSSL = true turns on certificate checks
-            return WebUtils::URLOptions(url, std::move(query), std::move(headers), true);
+        using Http::Response;
+
+        void Post(std::string const& url, std::string const& token, std::string body, std::function<void(Response)> done) {
+            Http::Request(url, token, std::move(body), std::move(done));
         }
 
-        void Post(std::string const& url, std::string const& token, std::string body, std::function<void(WebUtils::StringResponse)> done) {
-            // the body must outlive the request, so the callback keeps it alive
-            auto data = std::make_shared<std::string>(std::move(body));
-            std::span<uint8_t const> span((uint8_t const*) data->data(), data->size());
-            WebUtils::PostAsync<WebUtils::StringResponse>(Options(url, token), span, [data, done](WebUtils::StringResponse r) {
-                BSML::MainThreadScheduler::Schedule([r = std::move(r), done]() mutable { done(std::move(r)); });
-            });
+        void Get(std::string const& url, std::string const& token, std::function<void(Response)> done) {
+            Http::Request(url, token, std::nullopt, std::move(done));
         }
 
-        void Get(WebUtils::URLOptions options, std::function<void(WebUtils::StringResponse)> done) {
-            WebUtils::GetAsync<WebUtils::StringResponse>(std::move(options), [done](WebUtils::StringResponse r) {
-                BSML::MainThreadScheduler::Schedule([r = std::move(r), done]() mutable { done(std::move(r)); });
-            });
-        }
-
-        bool ParseJson(WebUtils::StringResponse const& r, rapidjson::Document& doc) {
+        bool ParseJson(Response const& r, rapidjson::Document& doc) {
             if (!r.responseData)
                 return false;
             doc.Parse(r.responseData->c_str());
@@ -177,7 +164,7 @@ namespace StudioSync {
                 SetStatus("That code expired. Press Link to get a new one.");
                 return;
             }
-            Get(Options(Server() + "/link/status", token, {{"code", code}}), [token](WebUtils::StringResponse r) {
+            Get(Server() + "/link/status?code=" + code, token, [token](Response r) {
                 if (token != pendingToken)
                     return;
                 rapidjson::Document doc;
@@ -221,7 +208,7 @@ namespace StudioSync {
                 return;
             }
             auto item = (*queue)[index];
-            Get(Options(item.url, ""), [=](WebUtils::StringResponse r) {
+            Get(item.url, "", [=](Response r) {
                 bool ok = false;
                 if (r.IsSuccessful() && r.responseData && r.responseData->size() <= MAX_PLAYLIST_BYTES) {
                     rapidjson::Document doc;
@@ -295,13 +282,13 @@ namespace StudioSync {
         pendingToken = token;
         code.clear();
         SetStatus("Getting a code...");
-        Post(Server() + "/link/start", token, R"({"name":"Quest"})", [token](WebUtils::StringResponse r) {
+        Post(Server() + "/link/start", token, R"({"name":"Quest"})", [token](Response r) {
             if (token != pendingToken)
                 return;
             rapidjson::Document doc;
             if (!r.IsSuccessful() || !ParseJson(r, doc) || GetString(doc, "code").empty()) {
                 pendingToken.clear();
-                SetStatus(r.httpCode == 429 ? "Too many tries. Wait a few minutes." : "Couldn't reach Playlist Studio. Check your connection.");
+                SetStatus(r.httpCode == 429 ? "Too many tries. Wait a few minutes." : "Couldn't reach Playlist Studio (" + r.Describe() + ").");
                 return;
             }
             code = GetString(doc, "code");
@@ -324,7 +311,7 @@ namespace StudioSync {
         if (token.empty())
             return;
         // Playlists already on the headset stay; they just stop updating.
-        Post(Server() + "/link/unlink", token, "{}", [](WebUtils::StringResponse) {});
+        Post(Server() + "/link/unlink", token, "{}", [](Response) {});
         ForgetLink("Unlinked. Your synced playlists stay but won't update.");
     }
 
@@ -343,7 +330,7 @@ namespace StudioSync {
         syncing = true;
         lastSync = now;
         SetStatus("Syncing...");
-        Get(Options(Server() + "/link/manifest", token), [token](WebUtils::StringResponse r) {
+        Get(Server() + "/link/manifest", token, [token](Response r) {
             if (token != getConfig().Token.GetValue()) {
                 syncing = false;
                 return;
@@ -356,7 +343,7 @@ namespace StudioSync {
             rapidjson::Document doc;
             if (!r.IsSuccessful() || !ParseJson(r, doc) || !doc.HasMember("playlists") || !doc["playlists"].IsArray()) {
                 syncing = false;
-                SetStatus("Couldn't reach Playlist Studio. Will try again later.");
+                SetStatus("Couldn't reach Playlist Studio (" + r.Describe() + "). Will try again later.");
                 return;
             }
             // Only accept files served by the same Worker, never an arbitrary address.
