@@ -14,6 +14,7 @@
 
 #include "HMUI/CurvedTextMeshPro.hpp"
 #include "HMUI/TextSegmentedControlCell.hpp"
+#include "TMPro/TextMeshProUGUI.hpp"
 #include "TMPro/TextAlignmentOptions.hpp"
 #include "UnityEngine/GameObject.hpp"
 #include "UnityEngine/Object.hpp"
@@ -48,8 +49,11 @@ namespace {
                 found = true;
             }
         for (auto cell : UnityEngine::Resources::FindObjectsOfTypeAll<HMUI::TextSegmentedControlCell*>())
-            if (cell && cell->_text && std::string(cell->get_text()) == from)
+            if (cell && cell->_text && std::string(cell->get_text()) == from) {
+                // Tab labels have rich text off, which would print the color tag instead of a green dot.
+                cell->_text->set_richText(true);
                 cell->set_text(StringW(to));
+            }
         return found;
     }
 
@@ -65,8 +69,17 @@ namespace {
         });
     }
 
+    // BSML can rebuild the labels (paging the tab row), which turns rich text back off.
+    void KeepDotRendered() {
+        for (auto cell : UnityEngine::Resources::FindObjectsOfTypeAll<HMUI::TextSegmentedControlCell*>())
+            if (cell && cell->_text && !cell->_text->get_richText() && std::string(cell->get_text()) == TAB_NAME_BUSY)
+                cell->_text->set_richText(true);
+    }
+
     void UpdateTabDot() {
         bool busy = IsSyncing();
+        if (tabDotShown)
+            KeepDotRendered();
         if (busy != tabDotShown && RenameTab(busy ? TAB_NAME : TAB_NAME_BUSY, busy ? TAB_NAME_BUSY : TAB_NAME))
             tabDotShown = busy;
         // Keep checking while busy (the tab may not exist yet) and while the dot shows.
