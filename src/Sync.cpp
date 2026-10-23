@@ -25,9 +25,23 @@
 #include "playlistcore/shared/PlaylistCore.hpp"
 #include "songcore/shared/SongCore.hpp"
 
+#include "GlobalNamespace/AnnotatedBeatmapLevelCollectionsViewController.hpp"
+#include "GlobalNamespace/BeatmapLevel.hpp"
+#include "GlobalNamespace/BeatmapLevelPack.hpp"
+#include "GlobalNamespace/BeatmapLevelsModel.hpp"
+#include "GlobalNamespace/LevelCollectionNavigationController.hpp"
+#include "GlobalNamespace/LevelCollectionTableView.hpp"
+#include "GlobalNamespace/LevelCollectionViewController.hpp"
+#include "GlobalNamespace/LevelFilteringNavigationController.hpp"
+#include "GlobalNamespace/LevelSelectionNavigationController.hpp"
 #include "GlobalNamespace/PlayerData.hpp"
 #include "GlobalNamespace/PlayerDataModel.hpp"
+#include "GlobalNamespace/SelectLevelCategoryViewController.hpp"
+#include "HMUI/ScrollView.hpp"
+#include "HMUI/TableView.hpp"
 #include "System/Collections/Generic/HashSet_1.hpp"
+#include "System/Collections/Generic/IReadOnlyList_1.hpp"
+#include "System/Threading/CancellationTokenSource.hpp"
 #include "UnityEngine/Resources.hpp"
 
 namespace StudioSync {
@@ -582,6 +596,105 @@ namespace StudioSync {
             CheckNext(c);
         }
 
+        // ---- song select's playlist list ----
+        // Song select builds its playlist list when it opens and keeps it. PlaylistCore's reload swaps in new
+        // playlists underneath without touching that list, so playlists a sync added or deleted only showed
+        // after a trip to the main menu. Rebuild it the way SongCore does after a song refresh, keeping the
+        // open playlist, the selected song and the scroll spot.
+        std::vector<UnityW<GlobalNamespace::LevelSelectionNavigationController>> songSelects;
+        bool listStale = false, listWaiting = false;
+
+        void RebuildList(GlobalNamespace::LevelSelectionNavigationController* select) {
+            using Category = GlobalNamespace::SelectLevelCategoryViewController::LevelCategory;
+            auto nav = select->_levelFilteringNavigationController;
+            if (!nav)
+                return;
+            auto collection = select->_levelCollectionNavigationController;
+            auto levels = collection ? collection->_levelCollectionViewController : nullptr;
+            auto table = levels ? levels->_levelCollectionTableView : nullptr;
+            auto level = table ? table->_selectedBeatmapLevel : nullptr;
+            std::string levelId = level ? std::string(level->levelID) : "";
+            auto tableView = table ? table->_tableView : nullptr;
+            auto scroll = tableView ? tableView->_scrollView : nullptr;
+            float position = scroll ? scroll->position : 0;
+
+            auto category = nav->selectedLevelCategory;
+            if (category == Category::MusicPacks || category == Category::CustomSongs) {
+                if (auto pack = nav->selectedBeatmapLevelPack) {
+                    // Reopen the same playlist if it's still there; a deleted one falls back to the first.
+                    if (nav->_beatmapLevelsModel && nav->_beatmapLevelsModel->GetLevelPack(pack->packID))
+                        nav->_levelPackIdToBeSelectedAfterPresent = pack->packID;
+                    else
+                        position = 0;
+                }
+            }
+            nav->_customLevelPacks = nullptr;
+            if (nav->_annotatedBeatmapLevelCollectionsViewController)
+                nav->_annotatedBeatmapLevelCollectionsViewController->ShowLoading();
+            if (collection)
+                collection->ShowLoading();
+            nav->UpdateCustomSongs();
+
+            UnityW<GlobalNamespace::LevelSelectionNavigationController> keep = select;
+            BSML::MainThreadScheduler::ScheduleUntil(
+                [keep]() { return !keep || !keep->_levelFilteringNavigationController || keep->_levelFilteringNavigationController->_cancellationTokenSource == nullptr; },
+                [keep, levelId, position]() {
+                    if (!keep || !keep->_levelFilteringNavigationController)
+                        return;
+                    auto collection = keep->_levelCollectionNavigationController;
+                    auto levels = collection ? collection->_levelCollectionViewController : nullptr;
+                    auto table = levels ? levels->_levelCollectionTableView : nullptr;
+                    auto model = keep->_levelFilteringNavigationController->_beatmapLevelsModel;
+                    auto level = (model && !levelId.empty()) ? model->GetBeatmapLevel(levelId) : nullptr;
+                    if (level && table)
+                        table->SelectLevel(level);
+                    auto tableView = table ? table->_tableView : nullptr;
+                    auto scroll = tableView ? tableView->_scrollView : nullptr;
+                    if (scroll)
+                        scroll->ScrollTo(position, false);
+                });
+        }
+
+        // Rebuild now if song select is showing. If it's only hidden (a song is playing, or the results
+        // screen is up), rebuild when it comes back. Opening it from the main menu builds a fresh list anyway.
+        void CheckList() {
+            if (!listStale)
+                return;
+            bool coming = false;
+            for (auto& s : songSelects) {
+                if (!s)
+                    continue;
+                if (s->get_isActivated() && s->get_isActiveAndEnabled()) {
+                    listStale = false;
+                    RebuildList(s.ptr());
+                    return;
+                }
+                coming = coming || s->get_isInViewControllerHierarchy();
+            }
+            if (!coming) {
+                listStale = false;
+                return;
+            }
+            if (listWaiting)
+                return;
+            listWaiting = true;
+            BSML::MainThreadScheduler::ScheduleAfterTime(1.0f, []() {
+                listWaiting = false;
+                CheckList();
+            });
+        }
+
+        // PlaylistCore picks up the playlist files on disk, then song select shows them.
+        void ReloadPlaylists() {
+            PlaylistCore::ReloadPlaylists(false);
+            songSelects.clear();
+            for (auto s : UnityEngine::Resources::FindObjectsOfTypeAll<GlobalNamespace::LevelSelectionNavigationController*>())
+                if (s)
+                    songSelects.emplace_back(s);
+            listStale = true;
+            CheckList();
+        }
+
         // Delete song folders one at a time through SongCore (it deletes on a worker thread), then rescan
         // once. done(n) gets how many folders are gone.
         void DeleteSongFolders(std::shared_ptr<std::vector<std::string>> paths, size_t i, std::function<void(int)> progress, std::function<void(int)> done) {
@@ -595,7 +708,7 @@ namespace StudioSync {
                 BSML::MainThreadScheduler::ScheduleUntil(
                     [refresh]() { return refresh.wait_for(std::chrono::seconds(0)) == std::future_status::ready; },
                     [done, gone]() {
-                        PlaylistCore::ReloadPlaylists(false);
+                        ReloadPlaylists();
                         done(gone);
                     });
                 return;
@@ -804,7 +917,7 @@ namespace StudioSync {
         void Finish(RunPtr run) {
             syncing = false;
             if (run->changed)
-                PlaylistCore::ReloadPlaylists(false);
+                ReloadPlaylists();
             summary.fromStudio.clear();
             for (auto const& it : run->items)
                 summary.fromStudio.push_back(it.title.empty() ? it.id : it.title);

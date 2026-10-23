@@ -1,5 +1,7 @@
 #include "Settings.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <vector>
 
@@ -31,8 +33,6 @@
 using namespace StudioSync;
 
 namespace {
-    constexpr size_t MAX_LISTED = 6;
-
     // The Mods tab label gets a green dot while a sync or song download is running,
     // so it shows from the tab row without opening Studio Sync.
     constexpr std::string_view TAB_NAME = "Studio Sync";
@@ -120,45 +120,82 @@ namespace {
             button->get_gameObject()->SetActive(on);
     }
 
+    // At most n characters, ending in "..." when cut.
+    std::string Shorten(std::string const& t, size_t n) {
+        return t.size() <= n ? t : t.substr(0, n - 3) + "...";
+    }
+
+    // What the last sync changed, one short line per kind of change, so a big sync can't grow the tab.
+    constexpr size_t LINE_CHARS = 56;  // the "Sharing N of your M playlists..." line fits on one line
+    constexpr size_t NAME_CHARS = 24;
+    constexpr size_t MAX_CHANGE_LINES = 3;
+
+    struct Change {
+        std::string label;
+        std::vector<std::string> const* names;
+        std::string note;  // gray text after the names
+    };
+
+    // "Edited Favorites, MSploit - Session and 3 more": as many names as fit on the line.
+    std::string ChangeLine(Change const& c) {
+        auto const& names = *c.names;
+        size_t fixed = c.label.size() + 1 + (c.note.empty() ? 0 : c.note.size() + 1);
+        auto more = [&](size_t k) { return k < names.size() ? " and " + std::to_string(names.size() - k) + " more" : std::string(); };
+        size_t k = names.size();
+        for (; k > 1; k--) {
+            size_t len = fixed + more(k).size();
+            for (size_t i = 0; i < k; i++)
+                len += (i ? 2 : 0) + std::min(names[i].size(), NAME_CHARS);
+            if (len <= LINE_CHARS)
+                break;
+        }
+        // Down to one name: give it whatever room is left.
+        size_t room = LINE_CHARS > fixed + more(k).size() ? LINE_CHARS - fixed - more(k).size() : 0;
+        std::string out = "<b>" + c.label + "</b> ";
+        for (size_t i = 0; i < k; i++)
+            out += (i ? ", " : "") + Shorten(names[i], k == 1 ? std::max<size_t>(10, std::min(room, NAME_CHARS + 8)) : NAME_CHARS);
+        if (k < names.size())
+            out += " <color=#9aa4b2>" + more(k).substr(1) + "</color>";
+        if (!c.note.empty())
+            out += " <color=#9aa4b2>" + c.note + "</color>";
+        return out;
+    }
+
     std::string Details() {
         auto const& s = GetSummary();
-        std::string out;
-        // Older links to playlists hosted by Studio (before it wrote straight to the headset).
-        if (!s.fromStudio.empty()) {
-            out += "<b>Linked from Studio (" + std::to_string(s.fromStudio.size()) + ")</b>\n";
-            for (size_t i = 0; i < s.fromStudio.size() && i < MAX_LISTED; i++)
-                out += "  " + s.fromStudio[i] + "\n";
-            if (s.fromStudio.size() > MAX_LISTED)
-                out += "  <color=#9aa4b2>and " + std::to_string(s.fromStudio.size() - MAX_LISTED) + " more</color>\n";
-        }
-        if (!s.addedLast.empty()) {
-            out += "<b>Added from Studio</b>\n";
-            for (size_t i = 0; i < s.addedLast.size() && i < MAX_LISTED; i++)
-                out += "  " + s.addedLast[i] + "\n";
-        }
-        if (!s.editedLast.empty()) {
-            out += "<b>Edited in Studio</b>\n";
-            for (size_t i = 0; i < s.editedLast.size() && i < MAX_LISTED; i++)
-                out += "  " + s.editedLast[i] + "\n";
-        }
-        if (!s.deletedLast.empty()) {
-            out += "<b>Deleted in Studio</b> <color=#9aa4b2>(restorable for 30 days)</color>\n";
-            for (size_t i = 0; i < s.deletedLast.size() && i < MAX_LISTED; i++)
-                out += "  " + s.deletedLast[i] + "\n";
-            if (s.songsDeletedLast > 0)
-                out += "  <color=#9aa4b2>and " + Plural(s.songsDeletedLast, "song", "songs") + " no other playlist used</color>\n";
-        }
-        if (!s.restoredLast.empty()) {
-            out += "<b>Restored from a backup</b>\n";
-            for (size_t i = 0; i < s.restoredLast.size() && i < MAX_LISTED; i++)
-                out += "  " + s.restoredLast[i] + "\n";
-        }
-        out += "<color=#9aa4b2>Sharing " + std::to_string(s.shared) + " of your " + std::to_string(s.total) + " playlists with Studio";
+        std::string out = "<color=#9aa4b2>Sharing " + std::to_string(s.shared) + " of your " + std::to_string(s.total) + " playlists with Studio";
         if (!s.lastSync.empty())
             out += " · last sync " + s.lastSync;
         if (s.missing > 0)
             out += "\n" + Plural(s.missing, "song", "songs") + " in your playlists " + (s.missing == 1 ? "isn't" : "aren't") + " downloaded";
         out += "</color>";
+
+        std::vector<Change> changes;
+        if (!s.addedLast.empty())
+            changes.push_back({"Added", &s.addedLast, ""});
+        if (!s.editedLast.empty())
+            changes.push_back({"Edited", &s.editedLast, ""});
+        if (!s.deletedLast.empty())
+            changes.push_back({"Deleted", &s.deletedLast, s.songsDeletedLast > 0 ? "(with " + Plural(s.songsDeletedLast, "song", "songs") + ", restorable)" : "(restorable)"});
+        if (!s.restoredLast.empty())
+            changes.push_back({"Restored", &s.restoredLast, ""});
+        // Older links to playlists hosted by Studio (before it wrote straight to the headset).
+        if (!s.fromStudio.empty())
+            changes.push_back({"Linked from Studio", &s.fromStudio, ""});
+        for (size_t i = 0; i < changes.size(); i++) {
+            if (i + 1 == MAX_CHANGE_LINES && changes.size() > MAX_CHANGE_LINES) {
+                // No room for a line each: count the rest on one line.
+                std::string rest;
+                for (size_t j = i; j < changes.size(); j++) {
+                    std::string label = changes[j].label;
+                    std::transform(label.begin(), label.end(), label.begin(), [](unsigned char ch) { return std::tolower(ch); });
+                    rest += (rest.empty() ? "" : ", ") + std::to_string(changes[j].names->size()) + " " + label;
+                }
+                out += "\n<b>Also</b> " + rest;
+                break;
+            }
+            out += "\n" + ChangeLine(changes[i]);
+        }
         return out;
     }
 
@@ -275,10 +312,6 @@ namespace {
     }
 
     // ---- choose which headset playlists Studio can see ----
-    std::string Shorten(std::string const& t, size_t n) {
-        return t.size() <= n ? t : t.substr(0, n - 1) + "...";
-    }
-
     void UpdateShareCount() {
         if (!shareCount)
             return;
@@ -437,7 +470,6 @@ namespace {
         BSML::Lite::CreateText(parent, "Studio Sync", TMPro::FontStyles::Bold, 5);
         statusText = BSML::Lite::CreateText(parent, "", TMPro::FontStyles::Normal, 3.6);
         codeText = BSML::Lite::CreateText(parent, "", TMPro::FontStyles::Bold, 12);
-        detailText = BSML::Lite::CreateText(parent, "", TMPro::FontStyles::Normal, 3.2);
 
         auto link = BSML::Lite::CreateUIButton(parent, "Link", [] { StartLink(); });
         BSML::Lite::AddHoverHint(link, "Shows a code to type into Playlist Studio's Linked Quest panel");
@@ -474,6 +506,9 @@ namespace {
         auto dl = Sized(BSML::Lite::CreateToggle(parent, "Download missing songs", AutoDownload(), [](bool on) { SetAutoDownload(on); }), 7.0f);
         BSML::Lite::AddHoverHint(dl, "Downloads songs you don't have for playlists Studio sends, edits or restores");
         downloadToggle = dl->get_gameObject();
+
+        // Below every button, so a long list of changes can never push them off the panel.
+        detailText = BSML::Lite::CreateText(parent, "", TMPro::FontStyles::Normal, 3.2);
 
         BuildShareModal(tab->get_transform());
         BuildCleanModal(tab->get_transform());

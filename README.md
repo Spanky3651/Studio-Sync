@@ -33,8 +33,10 @@ The headset syncs when the game starts, each time you return to the main menu (a
 - deletes a playlist when you press **Delete** in Studio. Nothing is erased: the playlist moves into its backups and shows in Studio under **Recently deleted** for 30 days, where **Restore** brings it back. After 30 days those backups are cleared.
 - with **Also delete songs no other playlist uses** ticked in Studio's delete, deletes those songs too. It checks every playlist on the headset (including ones not shared with Studio), keeps your in-game favorites, and keeps songs BeatSaver no longer has, since those couldn't come back. Restoring the playlist downloads the deleted songs again.
 
+Song select's playlist list updates as soon as a sync adds, edits or deletes a playlist, and the playlist you have open stays open. If a sync finishes mid-song, the list updates when you're back at song select.
+
 ## In game
-Studio Sync lives in the **Mods** tab beside song select, next to mods like ReeSabers. **Sharing...** picks which of your playlists Studio can see, and **Download missing songs** turns automatic song downloads on or off.
+Studio Sync lives in the **Mods** tab beside song select, next to mods like ReeSabers. **Sharing...** picks which of your playlists Studio can see, and **Download missing songs** turns automatic song downloads on or off. What the last sync changed is listed under the buttons.
 
 - **Get missing** downloads every song any of your playlists lists that the headset doesn't have. The tab shows how many are missing.
 - **Clean up...** finds songs that aren't in any playlist and shows how many there are and how much space they take before anything happens. Delete, then Confirm, removes them. Favorites stay, and so do songs BeatSaver no longer has. The deleted songs are saved as a **Removed songs** playlist under **Recently deleted** in Studio for 30 days: restore it and they download again.
