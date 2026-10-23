@@ -66,6 +66,8 @@ namespace StudioSync {
         std::string pendingToken, code, status;
         std::chrono::steady_clock::time_point linkStarted, lastSync{};
         bool syncing = false, downloading = false;
+        // Sync now (or a Sharing change) asked for while a sync or song download was running.
+        bool syncAgain = false;
         Summary summary;
         std::function<void()> listener;
 
@@ -339,8 +341,12 @@ namespace StudioSync {
             for (auto key : {"playlistTitle", "playlistAuthor", "playlistDescription"})
                 if (edit.HasMember(key) && edit[key].IsString())
                     set(key, edit[key]);
-            if (edit.HasMember("image") && edit["image"].IsString() && edit["image"].GetStringLength() > 0)
+            if (edit.HasMember("image") && edit["image"].IsString() && edit["image"].GetStringLength() > 0) {
                 set("image", edit["image"]);
+                // PlaylistManager shows "imageString" before "image", so Studio's cover replaces both.
+                if (out.HasMember("imageString"))
+                    out.RemoveMember("imageString");
+            }
 
             std::map<std::string, rapidjson::Value const*> before;
             if (out.HasMember("songs") && out["songs"].IsArray())
@@ -403,10 +409,19 @@ namespace StudioSync {
             return n;
         }
 
+        // Run a sync that was asked for mid-sync, once this one (and its song downloads) are done.
+        void RunQueued() {
+            if (!syncAgain || syncing || downloading)
+                return;
+            syncAgain = false;
+            BSML::MainThreadScheduler::ScheduleAfterTime(0.5f, []() { SyncNow(); });
+        }
+
         void DownloadsDone(JobPtr job) {
             if (job->wanted == 0) {
                 downloading = false;
                 Notify();
+                RunQueued();
                 return;
             }
             SetStatus(job->base + ". Loading new songs...");
@@ -424,6 +439,7 @@ namespace StudioSync {
                             text += ". " + std::to_string(left) + " couldn't be found on BeatSaver";
                         downloading = false;
                         SetStatus(text);
+                        RunQueued();
                     });
                 });
         }
@@ -516,6 +532,7 @@ namespace StudioSync {
             SetStatus(text);
             if (getConfig().AutoDownload.GetValue() && !run->touched.empty())
                 StartDownloads(run->touched, text);
+            RunQueued();
         }
 
         void ApplyWrite(RunPtr run, size_t i) {
@@ -954,9 +971,15 @@ namespace StudioSync {
 
     void SyncNow(int minGapSeconds) {
         auto token = getConfig().Token.GetValue();
-        // A sync waits for songs still downloading from the last one.
-        if (token.empty() || syncing || downloading)
+        if (token.empty())
             return;
+        // A sync waits for songs still downloading from the last one. One you asked for (Sync now, a
+        // Sharing change) runs as soon as they finish; the automatic ones just skip.
+        if (syncing || downloading) {
+            if (minGapSeconds == 0)
+                syncAgain = true;
+            return;
+        }
         auto now = std::chrono::steady_clock::now();
         if (minGapSeconds > 0 && lastSync.time_since_epoch().count() != 0 && now - lastSync < std::chrono::seconds(minGapSeconds))
             return;
