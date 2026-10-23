@@ -142,6 +142,33 @@ namespace StudioSync {
             v.Accept(w);
             return sb.GetString();
         }
+        // Maps in a playlist, counted the way Studio counts them: each difficulty of a song is a map,
+        // a song without difficulties counts once.
+        int MapCount(rapidjson::Document const& doc) {
+            std::set<std::string> keys;
+            auto lower = [](std::string s) {
+                std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
+                return s;
+            };
+            for (auto const& song : doc["songs"].GetArray()) {
+                auto hash = lower(GetString(song, "hash"));
+                if (hash.empty())
+                    continue;
+                bool any = false;
+                auto ds = song.FindMember("difficulties");
+                if (ds != song.MemberEnd() && ds->value.IsArray())
+                    for (auto const& d : ds->value.GetArray()) {
+                        if (!d.IsObject())
+                            continue;
+                        auto mode = GetString(d, "characteristic");
+                        keys.insert(hash + "|" + lower(mode.empty() ? "Standard" : mode) + "|" + lower(GetString(d, "name")));
+                        any = true;
+                    }
+                if (!any)
+                    keys.insert(hash + "|*");
+            }
+            return (int) keys.size();
+        }
 
         bool ValidId(std::string const& id) {
             if (id.size() < 6 || id.size() > 16)
@@ -260,7 +287,7 @@ namespace StudioSync {
 
         struct BackupInfo {
             int64_t time = 0;
-            int count = -1;
+            int count = -1, maps = -1;
             std::string title, path;
         };
         // Every playlist's backups, newest first, keyed by playlist file name.
@@ -285,6 +312,7 @@ namespace StudioSync {
                 info.path = e.path().string();
                 if (e.file_size(sec) <= MAX_PLAYLIST_BYTES && ParseText(readfile(info.path), doc) && IsPlaylist(doc)) {
                     info.count = (int) doc["songs"].Size();
+                    info.maps = MapCount(doc);
                     info.title = GetString(doc, "playlistTitle");
                 }
                 out[stem.substr(0, dot)].push_back(info);
@@ -752,6 +780,7 @@ namespace StudioSync {
                 it.AddMember("file", rapidjson::Value(name.c_str(), a), a);
                 it.AddMember("title", rapidjson::Value(GetString(doc, "playlistTitle").c_str(), a), a);
                 it.AddMember("count", (int) doc["songs"].Size(), a);
+                it.AddMember("maps", MapCount(doc), a);
                 it.AddMember("sha", rapidjson::Value(Fingerprint(text).c_str(), a), a);
                 // Backups Studio can offer to restore.
                 rapidjson::Value baks(rapidjson::kArrayType);
@@ -760,6 +789,8 @@ namespace StudioSync {
                         rapidjson::Value bv(rapidjson::kObjectType);
                         bv.AddMember("t", b.time, a);
                         bv.AddMember("count", b.count, a);
+                        if (b.maps >= 0)
+                            bv.AddMember("maps", b.maps, a);
                         baks.PushBack(bv, a);
                     }
                 it.AddMember("backups", baks, a);
@@ -795,6 +826,8 @@ namespace StudioSync {
                     rapidjson::Value bv(rapidjson::kObjectType);
                     bv.AddMember("t", b.time, a);
                     bv.AddMember("count", b.count, a);
+                    if (b.maps >= 0)
+                        bv.AddMember("maps", b.maps, a);
                     baks.PushBack(bv, a);
                 }
                 dv.AddMember("backups", baks, a);
