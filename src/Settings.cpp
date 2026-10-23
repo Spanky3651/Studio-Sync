@@ -9,11 +9,15 @@
 #include "bsml/shared/BSML-Lite.hpp"
 #include "bsml/shared/BSML.hpp"
 #include "bsml/shared/BSML/Components/ModalView.hpp"
+#include "bsml/shared/BSML/Components/Tab.hpp"
+#include "bsml/shared/BSML/MainThreadScheduler.hpp"
 
 #include "HMUI/CurvedTextMeshPro.hpp"
+#include "HMUI/TextSegmentedControlCell.hpp"
 #include "TMPro/TextAlignmentOptions.hpp"
 #include "UnityEngine/GameObject.hpp"
 #include "UnityEngine/Object.hpp"
+#include "UnityEngine/Resources.hpp"
 #include "UnityEngine/Transform.hpp"
 #include "UnityEngine/RectTransform.hpp"
 #include "UnityEngine/TextAnchor.hpp"
@@ -27,6 +31,48 @@ using namespace StudioSync;
 
 namespace {
     constexpr size_t MAX_LISTED = 6;
+
+    // The Mods tab label gets a green dot while a sync or song download is running,
+    // so it shows from the tab row without opening Studio Sync.
+    constexpr std::string_view TAB_NAME = "Studio Sync";
+    constexpr std::string_view TAB_NAME_BUSY = "Studio Sync <color=#3ddc84>\u2022</color>";
+    bool tabDotShown = false, tabDotWatching = false;
+
+    // Returns false until BSML has built the tab (the first time the panel opens).
+    bool RenameTab(std::string_view from, std::string_view to) {
+        bool found = false;
+        // BSML rebuilds the labels from each Tab's name, so rename the Tab too, not only the label on screen.
+        for (auto tab : UnityEngine::Resources::FindObjectsOfTypeAll<BSML::Tab*>())
+            if (tab && tab->tabName && std::string(tab->tabName) == from) {
+                tab->tabName = StringW(to);
+                found = true;
+            }
+        for (auto cell : UnityEngine::Resources::FindObjectsOfTypeAll<HMUI::TextSegmentedControlCell*>())
+            if (cell && cell->_text && std::string(cell->get_text()) == from)
+                cell->set_text(StringW(to));
+        return found;
+    }
+
+    void UpdateTabDot();
+    // A sync that ends without saying so (rare) can't leave the dot stuck: recheck while it shows.
+    void WatchTabDot() {
+        if (tabDotWatching)
+            return;
+        tabDotWatching = true;
+        BSML::MainThreadScheduler::ScheduleAfterTime(2.0f, []() {
+            tabDotWatching = false;
+            UpdateTabDot();
+        });
+    }
+
+    void UpdateTabDot() {
+        bool busy = IsSyncing();
+        if (busy != tabDotShown && RenameTab(busy ? TAB_NAME : TAB_NAME_BUSY, busy ? TAB_NAME_BUSY : TAB_NAME))
+            tabDotShown = busy;
+        // Keep checking while busy (the tab may not exist yet) and while the dot shows.
+        if (busy || tabDotShown)
+            WatchTabDot();
+    }
 
     UnityW<HMUI::CurvedTextMeshPro> statusText, codeText, detailText;
     UnityW<UnityEngine::UI::Button> linkButton, cancelButton, syncButton, unlinkButton;
@@ -260,7 +306,6 @@ namespace {
         downloadToggle = dl->get_gameObject();
 
         BuildShareModal(tab->get_transform());
-        SetListener(Refresh);
     }
 
     void TabActivated(UnityEngine::GameObject* tab, bool firstActivation) {
@@ -275,6 +320,11 @@ namespace {
 namespace StudioSync {
     void RegisterUI() {
         // Same Mods panel beside song select that ReeSaber and other mods use.
-        BSML::Register::RegisterGameplaySetupTab("Studio Sync", TabActivated, BSML::MenuType::All);
+        BSML::Register::RegisterGameplaySetupTab(std::string(TAB_NAME), TabActivated, BSML::MenuType::All);
+        // Set here, not when the tab is first opened, so the dot works before anyone opens it.
+        SetListener([]() {
+            UpdateTabDot();
+            Refresh();
+        });
     }
 }
