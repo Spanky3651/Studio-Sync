@@ -96,6 +96,24 @@ namespace {
     UnityW<HMUI::CurvedTextMeshPro> shareCount;
     bool shareChanged = false;
     std::chrono::steady_clock::time_point unlinkArmed{};
+    // Second row of the tab (Get missing, Clean up...) and the Clean up songs window.
+    UnityW<UnityEngine::GameObject> songsRow;
+    UnityW<UnityEngine::UI::Button> missingButton, cleanButton, cleanDelete;
+    UnityW<BSML::ModalView> cleanModal;
+    UnityW<HMUI::CurvedTextMeshPro> cleanText;
+    bool cleanArmed = false;
+
+    std::string Plural(int n, std::string const& one, std::string const& many) {
+        return std::to_string(n) + " " + (n == 1 ? one : many);
+    }
+    std::string Size(int64_t bytes) {
+        char buf[32];
+        if (bytes >= 1000000000LL)
+            std::snprintf(buf, sizeof(buf), "%.1f GB", bytes / 1e9);
+        else
+            std::snprintf(buf, sizeof(buf), "%.0f MB", std::max<double>(1.0, bytes / 1e6));
+        return buf;
+    }
 
     void Show(UnityW<UnityEngine::UI::Button> button, bool on) {
         if (button)
@@ -127,6 +145,8 @@ namespace {
             out += "<b>Deleted in Studio</b> <color=#9aa4b2>(restorable for 30 days)</color>\n";
             for (size_t i = 0; i < s.deletedLast.size() && i < MAX_LISTED; i++)
                 out += "  " + s.deletedLast[i] + "\n";
+            if (s.songsDeletedLast > 0)
+                out += "  <color=#9aa4b2>and " + Plural(s.songsDeletedLast, "song", "songs") + " no other playlist used</color>\n";
         }
         if (!s.restoredLast.empty()) {
             out += "<b>Restored from a backup</b>\n";
@@ -136,15 +156,102 @@ namespace {
         out += "<color=#9aa4b2>Sharing " + std::to_string(s.shared) + " of your " + std::to_string(s.total) + " playlists with Studio";
         if (!s.lastSync.empty())
             out += " · last sync " + s.lastSync;
+        if (s.missing > 0)
+            out += "\n" + Plural(s.missing, "song", "songs") + " in your playlists " + (s.missing == 1 ? "isn't" : "aren't") + " downloaded";
         out += "</color>";
         return out;
+    }
+
+    // ---- Clean up songs ----
+    void RefreshClean() {
+        if (!cleanText)
+            return;
+        using State = LooseSongs::State;
+        auto const& l = GetLooseSongs();
+        std::string text, kept;
+        if (l.favorites > 0)
+            kept = Plural(l.favorites, "favorite", "favorites");
+        if (l.notOnBeatSaver > 0)
+            kept += (kept.empty() ? "" : " and ") + Plural(l.notOnBeatSaver, "song", "songs") + " BeatSaver doesn't have";
+        if (!kept.empty())
+            kept = "\n<color=#9aa4b2>" + kept + " stay.</color>";
+        bool canDelete = false;
+        switch (l.state) {
+            case State::Idle:
+            case State::Scanning:
+                text = "Looking for songs that aren't in any playlist...";
+                break;
+            case State::Checking:
+                text = "Checking them on BeatSaver: " + std::to_string(l.progress) + " of " + std::to_string(l.found - l.favorites);
+                break;
+            case State::Ready:
+                if (l.found == 0)
+                    text = "Every song on this headset is in a playlist. Nothing to clean up.";
+                else if (l.toDelete == 0)
+                    text = Plural(l.found, "song isn't", "songs aren't") + " in any playlist, and none can be deleted." + kept;
+                else {
+                    text = Plural(l.toDelete, "song", "songs") + (l.bytes > 0 ? " (" + Size(l.bytes) + ")" : "") + " " + (l.toDelete == 1 ? "isn't" : "aren't") +
+                           " in any of your playlists.\nThey're saved as \"Removed songs\" under Recently deleted in Playlist Studio. Restore it there within 30 days to download them again." + kept;
+                    canDelete = !IsSyncing();
+                    if (!canDelete)
+                        text += "\n<color=#9aa4b2>Waiting for the sync to finish.</color>";
+                    else if (cleanArmed)
+                        text += "\n<b>Press Confirm to delete them.</b>";
+                }
+                break;
+            case State::Deleting:
+                text = "Deleting songs: " + std::to_string(l.progress) + " of " + std::to_string(l.toDelete);
+                break;
+            case State::Done:
+                text = "Deleted " + Plural(l.progress, "song", "songs") + (l.bytes > 0 ? ", freed " + Size(l.bytes) : "") + ".\nTo get them back, restore \"Removed songs\" in Playlist Studio.";
+                break;
+            case State::Failed:
+                text = l.message;
+                break;
+        }
+        cleanText->set_text(text);
+        if (cleanDelete) {
+            bool show = l.state == State::Ready && l.toDelete > 0;
+            cleanDelete->get_gameObject()->SetActive(show);
+            cleanDelete->set_interactable(canDelete);
+            BSML::Lite::SetButtonText(cleanDelete.ptr(), cleanArmed && canDelete ? "Confirm" : "Delete");
+        }
+    }
+
+    void OpenClean() {
+        if (!cleanModal)
+            return;
+        cleanArmed = false;
+        ScanLooseSongs();
+        RefreshClean();
+        cleanModal->Show();
+    }
+
+    // Two presses, like Unlink: the first shows what's about to happen.
+    void PressCleanDelete() {
+        if (!cleanArmed) {
+            cleanArmed = true;
+            RefreshClean();
+            return;
+        }
+        cleanArmed = false;
+        DeleteLooseSongs();
+        RefreshClean();
+    }
+
+    void CleanClosed() {
+        cleanArmed = false;
+        ResetLooseSongs();
     }
 
     void Refresh() {
         if (!statusText)
             return;
         bool linking = IsLinking(), linked = IsLinked();
-        statusText->set_text(Status());
+        std::string status = Status();
+        if (SyncQueued())
+            status += "\n<color=#9aa4b2>Sync now is queued. It runs as soon as this finishes.</color>";
+        statusText->set_text(status);
         codeText->set_text(Code());
         codeText->get_gameObject()->SetActive(!Code().empty());
         detailText->get_gameObject()->SetActive(linked && !linking);
@@ -155,10 +262,16 @@ namespace {
         Show(cancelButton, linking);
         if (linkedRow)
             linkedRow->SetActive(linked && !linking);
+        if (songsRow)
+            songsRow->SetActive(linked && !linking);
         if (downloadToggle)
             downloadToggle->SetActive(linked && !linking);
+        // Sync now stays pressable: during a sync or song download the press is queued (see the status line).
         if (syncButton)
-            syncButton->set_interactable(!IsSyncing());
+            syncButton->set_interactable(true);
+        if (missingButton)
+            missingButton->set_interactable(!IsSyncing() && MissingSongs() > 0);
+        RefreshClean();
     }
 
     // ---- choose which headset playlists Studio can see ----
@@ -251,6 +364,37 @@ namespace {
         shareList = parentT;
     }
 
+    // Same build as the Sharing window (fixed-height rows in a scroll container), which lays out right in game.
+    void BuildCleanModal(UnityEngine::Transform* parent) {
+        auto modal = BSML::Lite::CreateModal(parent, {100, 62}, [] { CleanClosed(); }, true);
+        cleanModal = modal;
+        auto content = BSML::Lite::CreateScrollableModalContainer(modal);
+        auto layout = content->GetComponent<UnityEngine::UI::VerticalLayoutGroup*>();
+        layout->set_childControlHeight(true);
+        layout->set_childForceExpandHeight(false);
+        layout->set_childAlignment(UnityEngine::TextAnchor::UpperCenter);
+        layout->set_spacing(1.0f);
+        auto parentT = content->get_transform();
+
+        Sized(BSML::Lite::CreateText(parentT, "Clean up songs", TMPro::FontStyles::Bold, 5), 7.0f)->set_alignment(TMPro::TextAlignmentOptions::Center);
+        auto text = Sized(BSML::Lite::CreateText(parentT, "", TMPro::FontStyles::Normal, 3.2), 30.0f);
+        text->set_alignment(TMPro::TextAlignmentOptions::Center);
+        text->set_enableWordWrapping(true);
+        cleanText = text;
+
+        auto row = Sized(BSML::Lite::CreateHorizontalLayoutGroup(parentT), 9.0f);
+        row->set_spacing(2.0f);
+        row->set_childForceExpandWidth(false);
+        row->set_childControlWidth(true);
+        row->set_childAlignment(UnityEngine::TextAnchor::MiddleCenter);
+        cleanDelete = BSML::Lite::CreateUIButton(row->get_transform(), "Delete", [] { PressCleanDelete(); });
+        BSML::Lite::CreateUIButton(row->get_transform(), "Close", [] {
+            if (cleanModal)
+                cleanModal->Hide();
+            CleanClosed();
+        });
+    }
+
     void OpenShare() {
         if (!shareModal)
             return;
@@ -314,11 +458,25 @@ namespace {
         BSML::Lite::AddHoverHint(unlink, "Stops syncing. Playlists already here stay.");
         unlinkButton = unlink;
 
+        // Second row, built exactly like the first so the buttons match it.
+        auto songs = BSML::Lite::CreateHorizontalLayoutGroup(parent);
+        songs->set_spacing(2.0f);
+        songs->set_childForceExpandWidth(false);
+        songs->set_childAlignment(UnityEngine::TextAnchor::MiddleCenter);
+        songsRow = songs->get_gameObject();
+        auto missing = BSML::Lite::CreateUIButton(songs->get_transform(), "Get missing", [] { GetMissingSongs(); });
+        BSML::Lite::AddHoverHint(missing, "Download every song your playlists list that this headset doesn't have");
+        missingButton = missing;
+        auto clean = BSML::Lite::CreateUIButton(songs->get_transform(), "Clean up...", [] { OpenClean(); });
+        BSML::Lite::AddHoverHint(clean, "Delete songs that aren't in any playlist. Shows what it would remove first.");
+        cleanButton = clean;
+
         auto dl = Sized(BSML::Lite::CreateToggle(parent, "Download missing songs", AutoDownload(), [](bool on) { SetAutoDownload(on); }), 7.0f);
         BSML::Lite::AddHoverHint(dl, "Downloads songs you don't have for playlists Studio sends, edits or restores");
         downloadToggle = dl->get_gameObject();
 
         BuildShareModal(tab->get_transform());
+        BuildCleanModal(tab->get_transform());
     }
 
     void TabActivated(UnityEngine::GameObject* tab, bool firstActivation) {
@@ -326,6 +484,7 @@ namespace {
             Build(tab);
         if (IsLinked() && !IsLinking())
             SyncNow(30);
+        CountMissingSongs();
         Refresh();
     }
 }

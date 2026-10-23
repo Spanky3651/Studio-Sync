@@ -17,6 +17,21 @@ namespace StudioSync {
         std::string lastSync;                 // local time of the last good sync, e.g. "8:31 AM"
         int downloadedLast = 0;               // songs downloaded after the last sync
         int notFoundLast = 0;                 // songs that couldn't be downloaded (gone from BeatSaver)
+        int songsDeletedLast = 0;             // songs deleted along with playlists deleted in Studio
+        int missing = -1;                     // songs the headset's playlists list but it doesn't have (-1 = not counted yet)
+    };
+
+    // Clean up songs: songs on the headset that aren't in any playlist.
+    struct LooseSongs {
+        enum class State { Idle, Scanning, Checking, Ready, Deleting, Done, Failed };
+        State state = State::Idle;
+        int found = 0;           // songs in no playlist (WIP songs never count)
+        int favorites = 0;       // of those, in-game favorites, which stay
+        int notOnBeatSaver = 0;  // of those, songs BeatSaver doesn't have, which stay (they couldn't come back)
+        int toDelete = 0;        // what Delete removes
+        int64_t bytes = -1;      // their size on disk, -1 while it's being added up
+        int progress = 0;        // songs checked on BeatSaver, or deleted so far
+        std::string message;     // why it failed
     };
 
     // One of the player's own playlists on the headset.
@@ -51,6 +66,21 @@ namespace StudioSync {
     void Unlink();
 
     // Pull Studio's playlists and edits, push the headset's own playlists.
-    // Skipped when a sync ran less than `minGapSeconds` ago.
+    // Skipped when a sync ran less than `minGapSeconds` ago. Sync now (0) during a sync or song
+    // download is queued and runs right after it; an automatic one skipped during downloads runs then too.
     void SyncNow(int minGapSeconds = 0);
+    bool SyncQueued();
+
+    // Songs every playlist on the headset lists but it doesn't have; Get missing downloads them.
+    int MissingSongs();
+    void CountMissingSongs();
+    void GetMissingSongs();
+
+    // Clean up songs: Scan finds songs in no playlist and checks BeatSaver still has them; Delete removes
+    // those (favorites and songs BeatSaver lacks stay) after saving them as a "Removed songs" playlist
+    // backup, so Restore in Playlist Studio brings them back for 30 days.
+    LooseSongs const& GetLooseSongs();
+    void ScanLooseSongs();
+    void DeleteLooseSongs();
+    void ResetLooseSongs();
 }
