@@ -41,7 +41,7 @@ Studio Sync lives in the **Mods** tab beside song select, next to mods like ReeS
 - **Get missing** downloads every song any of your playlists lists that the headset doesn't have. The tab shows how many are missing.
 - **Clean up...** finds songs that aren't in any playlist and shows how many there are and how much space they take before anything happens. Delete, then Confirm, removes them. Favorites stay, and so do songs BeatSaver no longer has. The deleted songs are saved as a **Removed songs** playlist under **Recently deleted** in Studio for 30 days: restore it and they download again.
 
-![Studio Sync tab in the Mods panel, linked and up to date](docs/tab.jpg)
+![Studio Sync tab in the Mods panel with Get missing, Clean up and the last sync's changes](docs/tab.jpg)
 
 ## In Playlist Studio
 The **Studio Sync** panel lists every playlist your headset shares under **On Quest**. **Edit** opens one in Your Playlist, and your changes save and send themselves. The panel shows what's still on its way to the headset, **...** on each playlist has **Restore** and **Delete**, **Select** deletes several playlists at once, and **Recently deleted** brings back anything deleted in the last 30 days.
