@@ -14,6 +14,8 @@
 #include <thread>
 #include <vector>
 
+#include <sys/statvfs.h>
+
 #include "Config.hpp"
 #include "Http.hpp"
 #include "main.hpp"
@@ -34,6 +36,7 @@
 #include "GlobalNamespace/LevelCollectionViewController.hpp"
 #include "GlobalNamespace/LevelFilteringNavigationController.hpp"
 #include "GlobalNamespace/LevelSelectionNavigationController.hpp"
+#include "GlobalNamespace/PauseController.hpp"
 #include "GlobalNamespace/PlayerData.hpp"
 #include "GlobalNamespace/PlayerDataModel.hpp"
 #include "GlobalNamespace/SelectLevelCategoryViewController.hpp"
@@ -42,6 +45,7 @@
 #include "System/Collections/Generic/HashSet_1.hpp"
 #include "System/Collections/Generic/IReadOnlyList_1.hpp"
 #include "System/Threading/CancellationTokenSource.hpp"
+#include "UnityEngine/Application.hpp"
 #include "UnityEngine/Resources.hpp"
 
 namespace StudioSync {
@@ -53,6 +57,7 @@ namespace StudioSync {
         constexpr size_t BACKUPS_PER_PLAYLIST = 3;
         constexpr int64_t KEEP_DELETED_SECONDS = 30 * 86400;  // deleted playlists stay restorable this long
         constexpr size_t MAX_DELETED_LISTED = 30;
+        constexpr int STATS_EVERY_SECONDS = 30 * 60;  // headset storage for Studio, at most this often unless something changed
 
         using Http::Response;
         using SyncedMap = std::map<std::string, int64_t>;
@@ -80,7 +85,11 @@ namespace StudioSync {
             std::vector<std::string> touched;  // playlist paths written this sync, checked for missing songs
             std::vector<std::string> need;
             std::set<std::string> dropSongs;  // songs of playlists deleted with "also delete its songs"
-            bool changed = false;
+            // Studio's "My order" for the player's own playlists (file names, top first) and when it was saved
+            int64_t orderT = 0;
+            std::vector<std::string> orderFiles;
+            std::string cleanupId;  // a song clean up Studio asked for
+            bool changed = false, reloaded = false, reordered = false;
             int written = 0, removed = 0, failed = 0, shared = 0, total = 0, songsDeleted = 0;
         };
         using RunPtr = std::shared_ptr<Run>;
@@ -96,10 +105,22 @@ namespace StudioSync {
         Summary summary;
         LooseSongs loose;
         std::function<void()> listener;
+        // Headset storage for Studio: worked out on a worker thread now and then, more often after songs change.
+        bool statsRunning = false, statsDirty = true;
+        std::chrono::steady_clock::time_point statsAt{};
+        // The song clean up Studio asked for that's running now.
+        std::string cleanupRunning;
 
         void Notify() {
             if (listener)
                 listener();
+        }
+        // A song is being played. Work Studio asks for that reads every playlist or deletes songs waits for the menu.
+        bool Playing() {
+            for (auto p : UnityEngine::Resources::FindObjectsOfTypeAll<GlobalNamespace::PauseController*>())
+                if (p && p->get_isActiveAndEnabled())
+                    return true;
+            return false;
         }
         void SetStatus(std::string text) {
             status = std::move(text);
@@ -284,6 +305,7 @@ namespace StudioSync {
         void ForgetLink(std::string const& why) {
             getConfig().Token.SetValue("");
             SaveSynced({});
+            getConfig().OrderApplied.SetValue(0);
             summary = {};
             SetStatus(why);
         }
@@ -800,6 +822,8 @@ namespace StudioSync {
 
         void ApplyItems(RunPtr run);
         void SendInventory(RunPtr run);
+        void RefreshStats(bool force);
+        void StudioCleanup(std::string id, std::string token);
 
         // ---- downloading songs a synced playlist needs ----
         // PlaylistCore does the BeatSaver lookups and installs (the same code as PlaylistManager's
@@ -838,6 +862,7 @@ namespace StudioSync {
                 else
                     Notify();
                 CountMissingSongs();
+                RefreshStats(false);
                 RunQueued();
                 return;
             }
@@ -857,6 +882,7 @@ namespace StudioSync {
                         downloading = false;
                         SetStatus(text);
                         CountMissingSongs();
+                        RefreshStats(true);
                         RunQueued();
                     });
                 });
@@ -916,7 +942,7 @@ namespace StudioSync {
 
         void Finish(RunPtr run) {
             syncing = false;
-            if (run->changed)
+            if (run->changed && !run->reloaded)
                 ReloadPlaylists();
             summary.fromStudio.clear();
             for (auto const& it : run->items)
@@ -929,7 +955,7 @@ namespace StudioSync {
             summary.total = run->total;
             summary.lastSync = LocalTimeNow();
             std::string text = "Up to date";
-            if (run->written || run->removed || !run->edited.empty() || !run->created.empty() || !run->restored.empty() || !run->deleted.empty()) {
+            if (run->written || run->removed || run->reordered || !run->edited.empty() || !run->created.empty() || !run->restored.empty() || !run->deleted.empty()) {
                 text = "Synced";
                 if (!run->created.empty())
                     text += ", " + std::to_string(run->created.size()) + " added";
@@ -943,6 +969,8 @@ namespace StudioSync {
                     text += ", " + std::to_string(run->deleted.size()) + " deleted" + (run->songsDeleted ? " with " + std::to_string(run->songsDeleted) + " song" + (run->songsDeleted == 1 ? "" : "s") : "");
                 if (run->removed)
                     text += ", " + std::to_string(run->removed) + " removed";
+                if (run->reordered)
+                    text += ", playlist order from Studio";
             }
             if (run->failed)
                 text += ". " + std::to_string(run->failed) + " failed, will retry.";
@@ -953,6 +981,9 @@ namespace StudioSync {
                 StartDownloads(run->touched, text);
             // Count once PlaylistCore has picked up what this sync wrote.
             BSML::MainThreadScheduler::ScheduleAfterTime(3.0f, []() { CountMissingSongs(); });
+            RefreshStats(false);
+            if (!run->cleanupId.empty())
+                StudioCleanup(run->cleanupId, run->token);
             RunQueued();
         }
 
@@ -1123,6 +1154,7 @@ namespace StudioSync {
                     list, 0, [total](int n) { SetStatus("Deleting songs: " + std::to_string(n) + " of " + std::to_string(total)); },
                     [run](int gone) {
                         run->songsDeleted = gone;
+                        statsDirty = true;
                         SendInventory(run);
                     });
             });
@@ -1201,8 +1233,64 @@ namespace StudioSync {
             });
         }
 
-        // Tell Studio which of the headset's own playlists exist; it asks for the ones it lacks.
+        // Studio's "My order", put in game: the playlists it lists take the spots they already hold in PlaylistCore's
+        // order, sorted the way Studio has them. Everything else (Studio-hosted playlists, ones not shared, other
+        // mods') keeps its place. PlaylistCore only moves one playlist at a time, so the listed ones go to the end of
+        // the known order first, then each into its spot from the top; that gives exactly the order wanted.
+        bool ApplyOrder(RunPtr run) {
+            std::map<std::string, PlaylistCore::Playlist*> byFile;
+            int last = -1;
+            for (auto p : PlaylistCore::GetLoadedPlaylists()) {
+                if (!p)
+                    continue;
+                int idx = PlaylistCore::GetPlaylistIndex(p->path, false);
+                if (idx < 0)
+                    continue;
+                byFile[std::filesystem::path(p->path).filename().string()] = p;
+                last = std::max(last, idx);
+            }
+            std::vector<PlaylistCore::Playlist*> want;
+            std::set<PlaylistCore::Playlist*> seen;
+            for (auto const& f : run->orderFiles)
+                if (auto it = byFile.find(f); it != byFile.end() && seen.insert(it->second).second)
+                    want.push_back(it->second);
+            std::vector<int> slots;
+            for (auto p : want)
+                slots.push_back(PlaylistCore::GetPlaylistIndex(p->path, false));
+            std::sort(slots.begin(), slots.end());
+            bool inPlace = true;
+            for (size_t k = 0; k < want.size(); k++)
+                inPlace = inPlace && PlaylistCore::GetPlaylistIndex(want[k]->path, false) == slots[k];
+            if (inPlace || last < 0)
+                return false;
+            for (auto p : want)
+                PlaylistCore::MovePlaylist(p, last);
+            for (size_t k = 0; k < want.size(); k++)
+                if (PlaylistCore::GetPlaylistIndex(want[k]->path, false) != slots[k])
+                    PlaylistCore::MovePlaylist(want[k], slots[k]);
+            return true;
+        }
+
+        void PostInventory(RunPtr run);
         void SendInventory(RunPtr run) {
+            if (run->orderT > 0 && run->orderT > getConfig().OrderApplied.GetValue()) {
+                // Playlists this sync wrote load first, so the order can place them too.
+                if (run->changed && !run->reloaded) {
+                    ReloadPlaylists();
+                    run->reloaded = true;
+                }
+                if (ApplyOrder(run)) {
+                    ReloadPlaylists();
+                    run->reloaded = true;
+                    run->reordered = true;
+                }
+                getConfig().OrderApplied.SetValue((int) run->orderT);
+            }
+            PostInventory(run);
+        }
+
+        // Tell Studio which of the headset's own playlists exist; it asks for the ones it lacks.
+        void PostInventory(RunPtr run) {
             rapidjson::Document body(rapidjson::kObjectType);
             auto& a = body.GetAllocator();
             rapidjson::Value list(rapidjson::kArrayType);
@@ -1311,7 +1399,13 @@ namespace StudioSync {
             features.PushBack("restore", a);
             features.PushBack("delete", a);
             features.PushBack("delete-songs", a);
+            features.PushBack("storage", a);
+            features.PushBack("cleanup", a);
+            features.PushBack("order", a);
             body.AddMember("features", features, a);
+            // The "My order" it last put in game, so Studio stops showing it as waiting.
+            if (int applied = getConfig().OrderApplied.GetValue(); applied > 0)
+                body.AddMember("order", applied, a);
             Post(Server() + "/link/inventory", run->token, ToJson(body), [run](Response r) {
                 rapidjson::Document doc;
                 if (r.IsSuccessful() && ParseJson(r, doc) && doc.HasMember("need") && doc["need"].IsArray())
@@ -1319,6 +1413,191 @@ namespace StudioSync {
                         if (v.IsString())
                             run->need.push_back(v.GetString());
                 UploadNeeded(run, 0);
+            });
+        }
+
+        // ---- headset storage, for the card in Studio ----
+
+        struct StatsWork {
+            std::vector<std::pair<std::string, int>> folders;  // song folder, and: 0 in a playlist, 1 in none, 2 in none but a favorite, 3 WIP
+            std::string game, disk;
+        };
+
+        int64_t FolderBytes(std::string const& path) {
+            int64_t total = 0;
+            std::error_code ec;
+            for (auto it = std::filesystem::recursive_directory_iterator(path, ec); !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+                std::error_code fec;
+                if (it->is_regular_file(fec))
+                    total += (int64_t) it->file_size(fec);
+            }
+            return total;
+        }
+
+        // Songs, how much space they take, which ones no playlist uses, and the headset's free space. The folder
+        // list comes from SongCore on the main thread; adding up sizes happens on a worker thread. Skipped while
+        // a sync, download or clean up runs (it's asked for again when they finish).
+        void RefreshStats(bool force) {
+            if (force)
+                statsDirty = true;
+            if (!IsLinked() || statsRunning || syncing || downloading || cleaning)
+                return;
+            if (Playing()) {
+                statsDirty = true;  // the next sync, back in the menu, picks it up
+                return;
+            }
+            auto now = std::chrono::steady_clock::now();
+            if (!statsDirty && statsAt.time_since_epoch().count() != 0 && now - statsAt < std::chrono::seconds(STATS_EVERY_SECONDS))
+                return;
+            if (!SongCore::API::Loading::AreSongsLoaded() || SongCore::API::Loading::AreSongsRefreshing())
+                return;
+            auto favorites = GetFavorites();
+            auto used = SongsInPlaylists();
+            auto work = std::make_shared<StatsWork>();
+            std::set<std::string> seenPaths;
+            for (auto level : SongCore::API::Loading::GetAllLevels()) {
+                if (!level)
+                    continue;
+                std::string path(level->customLevelPath);
+                if (path.empty() || !seenPaths.insert(path).second)
+                    continue;
+                int kind = 0;
+                if (IsWip(level))
+                    kind = 3;
+                else if (auto hash = HashOfLevelId(std::string(level->levelID)); !hash.empty() && !used.contains(hash))
+                    kind = favorites && favorites->Contains(level->levelID) ? 2 : 1;
+                work->folders.emplace_back(std::move(path), kind);
+            }
+            work->game = std::string(UnityEngine::Application::get_version());
+            if (auto cut = work->game.find('_'); cut != std::string::npos)
+                work->game.erase(cut);
+            work->disk = getDataDir(std::string_view("StudioSync"));
+            statsRunning = true;
+            statsDirty = false;
+            statsAt = now;
+            std::thread([work]() {
+                int64_t bytes[4] = {0, 0, 0, 0};
+                int counts[4] = {0, 0, 0, 0};
+                for (auto const& [path, kind] : work->folders) {
+                    bytes[kind] += FolderBytes(path);
+                    counts[kind]++;
+                }
+                int64_t total = -1, freeBytes = -1;
+                struct statvfs fs{};
+                if (statvfs(work->disk.c_str(), &fs) == 0) {
+                    total = (int64_t) fs.f_blocks * (int64_t) fs.f_frsize;
+                    freeBytes = (int64_t) fs.f_bavail * (int64_t) fs.f_frsize;
+                }
+                rapidjson::Document body(rapidjson::kObjectType);
+                auto& a = body.GetAllocator();
+                body.AddMember("songs", counts[0] + counts[1] + counts[2], a);
+                body.AddMember("songBytes", bytes[0] + bytes[1] + bytes[2], a);
+                body.AddMember("loose", counts[1] + counts[2], a);
+                body.AddMember("looseBytes", bytes[1] + bytes[2], a);
+                body.AddMember("looseFav", counts[2], a);
+                body.AddMember("looseFavBytes", bytes[2], a);
+                body.AddMember("wip", counts[3], a);
+                body.AddMember("wipBytes", bytes[3], a);
+                body.AddMember("total", total, a);
+                body.AddMember("free", freeBytes, a);
+                body.AddMember("mod", rapidjson::Value(VERSION, a), a);
+                body.AddMember("game", rapidjson::Value(work->game.c_str(), a), a);
+                auto text = ToJson(body);
+                BSML::MainThreadScheduler::Schedule([text]() {
+                    statsRunning = false;
+                    auto token = getConfig().Token.GetValue();
+                    if (token.empty())
+                        return;
+                    Post(Server() + "/link/stats", token, text, [](Response r) {
+                        if (!r.IsSuccessful())
+                            logger.warn("Could not send headset storage to Studio (http {})", r.httpCode);
+                    });
+                });
+            }).detach();
+        }
+
+        // ---- song clean up asked for in Studio ----
+        // The same Clean up as the button in the tab: songs in no playlist go, favorites, WIP maps and songs BeatSaver
+        // no longer has stay, and what's deleted is saved as a "Removed songs" backup Studio can restore. It runs
+        // once nothing else is going on. If it can't run yet (songs still loading, favorites not read, BeatSaver down)
+        // it's left for the next sync; Studio keeps showing it as waiting.
+
+        void AckCleanup(std::string const& id, std::string const& token, std::string const& body) {
+            Post(Server() + "/link/cleanup/" + id + "/ack", token, body, [id](Response r) {
+                if (!r.IsSuccessful())
+                    logger.warn("Could not tell Studio clean up {} is done (http {})", id, r.httpCode);
+            });
+        }
+
+        void CleanupFinished(std::string const& id, std::string const& token, int deleted, int64_t bytes, int kept) {
+            rapidjson::Document d(rapidjson::kObjectType);
+            auto& a = d.GetAllocator();
+            d.AddMember("deleted", deleted, a);
+            d.AddMember("bytes", std::max<int64_t>(0, bytes), a);
+            d.AddMember("kept", kept, a);
+            auto body = ToJson(d);
+            getConfig().CleanupDone.SetValue(id);
+            getConfig().CleanupResult.SetValue(body);
+            cleanupRunning.clear();
+            AckCleanup(id, token, body);
+            RefreshStats(true);
+        }
+
+        void StudioCleanup(std::string id, std::string token) {
+            if (id == getConfig().CleanupDone.GetValue()) {
+                // Done already; Studio didn't hear about it.
+                auto result = getConfig().CleanupResult.GetValue();
+                AckCleanup(id, token, result.empty() ? "{}" : result);
+                return;
+            }
+            if (!cleanupRunning.empty())
+                return;
+            cleanupRunning = id;
+            BSML::MainThreadScheduler::ScheduleUntil([]() { return !syncing && !downloading && !cleaning && !Playing(); }, [id, token]() {
+                if (token != getConfig().Token.GetValue() || loose.state == LooseSongs::State::Deleting) {
+                    cleanupRunning.clear();
+                    return;
+                }
+                SetStatus("Playlist Studio asked for a song clean up. Looking for songs in no playlist...");
+                ScanLooseSongs();
+                int scan = looseScan;
+                using State = LooseSongs::State;
+                BSML::MainThreadScheduler::ScheduleUntil(
+                    // Done scanning, the size of what goes is added up, or the scan was dropped (the tab's Clean up closed).
+                    [scan]() { return scan != looseScan || loose.state == State::Failed || loose.state == State::Idle || (loose.state == State::Ready && (loose.toDelete == 0 || loose.bytes >= 0)); },
+                    [id, token, scan]() {
+                        if (scan != looseScan || loose.state != State::Ready) {
+                            if (scan == looseScan && loose.state == State::Failed)
+                                SetStatus("Song clean up from Playlist Studio waits for the next sync. " + loose.message);
+                            cleanupRunning.clear();
+                            return;
+                        }
+                        int kept = loose.favorites + loose.notOnBeatSaver;
+                        if (loose.toDelete == 0) {
+                            SetStatus(loose.found == 0 ? "Every song is in a playlist. Nothing to clean up." : "None of the songs in no playlist can be deleted.");
+                            CleanupFinished(id, token, 0, 0, kept);
+                            return;
+                        }
+                        int64_t bytes = loose.bytes;
+                        // Checking BeatSaver takes a moment; if a song started meanwhile, delete once it's over.
+                        BSML::MainThreadScheduler::ScheduleUntil([]() { return !Playing() && !syncing && !downloading && !cleaning; }, [id, token, scan, bytes, kept]() {
+                            if (scan != looseScan || loose.state != State::Ready || token != getConfig().Token.GetValue()) {
+                                cleanupRunning.clear();
+                                return;
+                            }
+                            DeleteLooseSongs();
+                            if (loose.state != State::Deleting) {
+                                cleanupRunning.clear();
+                                return;
+                            }
+                            BSML::MainThreadScheduler::ScheduleUntil([]() { return loose.state != State::Deleting; }, [id, token, bytes, kept]() {
+                                if (loose.state == State::Done)
+                                    CleanupFinished(id, token, loose.progress, bytes, kept);
+                                else
+                                    cleanupRunning.clear();
+                            });
+                        });
+                    });
             });
         }
 
@@ -1349,6 +1628,7 @@ namespace StudioSync {
                 if (state == "linked") {
                     getConfig().Token.SetValue(token);
                     SaveSynced({});
+                    getConfig().OrderApplied.SetValue(0);
                     pendingToken.clear();
                     code.clear();
                     SetStatus("Linked. Syncing...");
@@ -1543,6 +1823,7 @@ namespace StudioSync {
             },
             [](int gone) {
                 cleaning = false;
+                statsDirty = true;
                 loose.state = LooseSongs::State::Done;
                 loose.progress = gone;
                 SetStatus("Deleted " + std::to_string(gone) + (gone == 1 ? " song that wasn't" : " songs that weren't") + " in any playlist");
@@ -1720,6 +2001,21 @@ namespace StudioSync {
                         w.songs = w.remove && v.HasMember("songs") && v["songs"].IsBool() && v["songs"].GetBool();
                         run->writes.push_back(std::move(w));
                     }
+            if (auto order = doc.FindMember("order"); order != doc.MemberEnd() && order->value.IsObject()) {
+                auto t = order->value.FindMember("t");
+                auto files = order->value.FindMember("files");
+                if (t != order->value.MemberEnd() && t->value.IsInt64() && files != order->value.MemberEnd() && files->value.IsArray()) {
+                    run->orderT = t->value.GetInt64();
+                    for (auto const& f : files->value.GetArray())
+                        if (f.IsString() && ValidFile(f.GetString()))
+                            run->orderFiles.push_back(f.GetString());
+                }
+            }
+            if (auto clean = doc.FindMember("cleanup"); clean != doc.MemberEnd() && clean->value.IsObject()) {
+                auto id = GetString(clean->value, "id");
+                if (ValidId(id))
+                    run->cleanupId = id;
+            }
             ApplyWrite(run, 0);
         });
     }
