@@ -21,7 +21,7 @@ It works the other way too. The playlists already on your headset show up in Stu
 1. Install `StudioSync.qmod` with your mod manager (MBF, QuestPatcher).
 2. In game, open the **Mods** tab in the panel left of song select, pick **Studio Sync** and press **Link**. A 6-character code appears.
 3. In Playlist Studio, open **Studio Sync** and type the code.
-4. In Studio, open **Save and send**, pick the **Quest** tab and press **Send to Quest** for the playlist you're building.
+4. In Studio, open **Save and send**, pick the **Studio Sync** tab and press **Send to Quest** for the playlist you're building.
 
 The headset syncs when the game starts, each time you return to the main menu (at most every 2 minutes), when you open the tab, or right away with **Sync now**. While songs are downloading, **Sync now** is queued and runs as soon as they finish, and so does any automatic sync that came up in the meantime. Each sync:
 - writes new playlists you sent from Studio as normal playlist files. It never overwrites one that's there: if the name is taken, the new one is saved as "Name (2)",
@@ -46,7 +46,7 @@ Studio Sync lives in the **Mods** tab beside song select, next to mods like ReeS
 ![Studio Sync tab in the Mods panel with Get missing, Clean up and the last sync's changes](docs/tab.jpg)
 
 ## In Playlist Studio
-Studio Sync lives on the **Quest** tab of **Save and send** (the headset button in the top bar opens it). It lists every playlist your headset shares under **On Quest**. **Edit** opens one in Your Playlist, and your changes save and send themselves. The panel shows what's still on its way to the headset, **...** on each playlist has **Restore** and **Delete**, **Select** deletes several playlists at once, and **Recently deleted** brings back anything deleted in the last 30 days. Tap a playlist to see its maps without opening it, and drag the grips to set **My order**.
+Studio Sync lives on its own tab in **Save and send** (the headset button in the top bar opens it). It lists every playlist your headset shares under **On Quest**. **Edit** opens one in Your Playlist, and your changes save and send themselves. The panel shows what's still on its way to the headset, **...** on each playlist has **Restore** and **Delete**, **Select** deletes several playlists at once, and **Recently deleted** brings back anything deleted in the last 30 days. Tap a playlist to see its maps without opening it, and drag the grips to set **My order**.
 
 From 0.8.0, a storage card above the list shows the headset's songs, how much space they take, the songs no playlist uses and the free space, with a **Clean up songs** button. The headset works these out in the background at most every 30 minutes, and again after songs download or get deleted. Headsets on an older version don't show the card, and their order and clean up options stay hidden.
 
