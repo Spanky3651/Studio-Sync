@@ -92,11 +92,22 @@ namespace StudioSync::Indicator {
         }
 
         HMUI::CurvedTextMeshPro* MakeText(UnityEngine::RectTransform* parent, float size, float y, UnityEngine::Color color) {
-            auto t = BSML::Lite::CreateText(parent, "", TMPro::FontStyles::Normal, size, {0.0f, y}, {160.0f, size + 2.0f});
+            // Placed the way SongCore places its "Loading songs" text. The box is a lot taller than the text: TextMesh Pro
+            // drops a line that doesn't fit the box's height, which is why 0.8.1 showed only the bar. Long names are
+            // shortened before they get here, so the text never needs cutting.
+            auto t = BSML::Lite::CreateText(parent, "", TMPro::FontStyles::Normal, size, {0.0f, y}, {160.0f, size * 3.0f});
+            auto rect = t->get_rectTransform();
+            rect->SetParent(parent, false);
+            rect->set_anchorMin({0.5f, 0.5f});
+            rect->set_anchorMax({0.5f, 0.5f});
+            rect->set_pivot({0.5f, 0.5f});
+            rect->set_anchoredPosition({0.0f, y});
+            rect->set_sizeDelta({160.0f, size * 3.0f});
+            t->set_fontSize(size);
             t->set_alignment(TMPro::TextAlignmentOptions::Center);
             t->set_richText(true);
             t->set_enableWordWrapping(false);
-            t->set_overflowMode(TMPro::TextOverflowModes::Ellipsis);
+            t->set_overflowMode(TMPro::TextOverflowModes::Overflow);
             t->set_color(color);
             return t;
         }
@@ -127,9 +138,9 @@ namespace StudioSync::Indicator {
             rect->set_sizeDelta({170.0f, 40.0f});
             go->get_transform()->set_localScale({0.01f, 0.01f, 0.01f});
 
-            head = MakeText(rect, 5.5f, 12.0f, {0.8f, 0.85f, 0.9f, 1.0f});
-            line = MakeText(rect, 8.5f, 2.5f, {1.0f, 1.0f, 1.0f, 1.0f});
-            sub = MakeText(rect, 5.5f, -7.0f, {0.6f, 0.65f, 0.7f, 1.0f});
+            head = MakeText(rect, 6.0f, 13.0f, {0.8f, 0.85f, 0.9f, 1.0f});
+            line = MakeText(rect, 9.0f, 3.0f, {1.0f, 1.0f, 1.0f, 1.0f});
+            sub = MakeText(rect, 6.0f, -7.0f, {0.6f, 0.65f, 0.7f, 1.0f});
             barBack = MakeBar(rect, BAR_WIDTH, {1.0f, 1.0f, 1.0f, 0.15f}, false);
             bar = MakeBar(rect, BAR_WIDTH, {0.24f, 0.86f, 0.52f, 0.9f}, true);
             root = go;

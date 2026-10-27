@@ -30,5 +30,5 @@ DECLARE_CONFIG(Config) {
     CONFIG_VALUE(MissingResult, std::string, "missingResult", "");
     // the progress line in the menu while songs download or get cleaned up, and where it sits
     CONFIG_VALUE(ShowIndicator, bool, "showIndicator", true);
-    CONFIG_VALUE(IndicatorSpot, int, "indicatorSpot", 0);
+    CONFIG_VALUE(IndicatorSpot, int, "indicatorSpot", 3);  // 3 = Floor
 };
