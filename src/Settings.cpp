@@ -108,7 +108,6 @@ namespace {
     UnityW<BSML::ModalView> optionsModal;
     UnityW<UnityEngine::Transform> optionsList;
     std::vector<UnityW<UnityEngine::GameObject>> optionsRows;
-    UnityW<UnityEngine::UI::Button> spotButton, previewButton;
     UnityW<HMUI::CurvedTextMeshPro> autoCount;
     bool autoChanged = false;
 
@@ -436,13 +435,6 @@ namespace {
     }
 
     // ---- Options: the progress line in the menu, and auto-download per playlist ----
-    void UpdateOptionButtons() {
-        if (spotButton)
-            BSML::Lite::SetButtonText(spotButton.ptr(), "Spot: " + Indicator::SpotName(getConfig().IndicatorSpot.GetValue()));
-        if (previewButton)
-            BSML::Lite::SetButtonText(previewButton.ptr(), Indicator::Previewing() ? "Preview: on" : "Preview: off");
-    }
-
     void UpdateAutoCount() {
         if (!autoCount)
             return;
@@ -503,21 +495,6 @@ namespace {
             Indicator::Refresh();
         }), 7.0f);
         BSML::Lite::AddHoverHint(show, "A small line in the menu while songs download or get cleaned up, so you see it on any screen");
-        auto row = Sized(BSML::Lite::CreateHorizontalLayoutGroup(parentT), 9.0f);
-        row->set_spacing(2.0f);
-        row->set_childForceExpandWidth(false);
-        row->set_childControlWidth(true);
-        row->set_childAlignment(UnityEngine::TextAnchor::MiddleCenter);
-        spotButton = BSML::Lite::CreateUIButton(row->get_transform(), "Spot", [] {
-            Indicator::SetSpot(getConfig().IndicatorSpot.GetValue() + 1);
-            UpdateOptionButtons();
-        });
-        BSML::Lite::AddHoverHint(spotButton.ptr(), "Where the progress line sits. Turn on Preview to see it.");
-        previewButton = BSML::Lite::CreateUIButton(row->get_transform(), "Preview", [] {
-            Indicator::SetPreview(!Indicator::Previewing());
-            UpdateOptionButtons();
-        });
-        BSML::Lite::AddHoverHint(previewButton.ptr(), "Shows sample progress until you turn it off, so you can check it on every menu screen");
 
         Sized(BSML::Lite::CreateText(parentT, "Download missing songs", TMPro::FontStyles::Bold, 5), 7.0f)->set_alignment(TMPro::TextAlignmentOptions::Center);
         auto count = Sized(BSML::Lite::CreateText(parentT, "", TMPro::FontStyles::Normal, 3.2), 13.0f);
@@ -544,7 +521,6 @@ namespace {
         if (!optionsModal)
             return;
         autoChanged = false;
-        UpdateOptionButtons();
         FillAutoList();
         optionsModal->Show();
     }

@@ -33,19 +33,9 @@
 // that isn't attached to any menu screen, kept across scene changes, with BSML text on it.
 namespace StudioSync::Indicator {
     namespace {
-        struct Spot {
-            char const* name;
-            float x, y, z, rx;
-        };
-        // Top right is where PlaylistManager shows its own download bar. Floor is nearer than SongCore's
+        // On the floor in front of the player (picked in testing over the top corners), nearer than SongCore's
         // "Loading songs" text so the two don't overlap.
-        constexpr Spot SPOTS[] = {
-            {"Top left", -1.4f, 3.1f, 4.0f, 0.0f},
-            {"Top right", 1.4f, 3.1f, 4.0f, 0.0f},
-            {"Top center", 0.0f, 3.35f, 4.0f, 0.0f},
-            {"Floor", 0.0f, 0.02f, 1.9f, 90.0f},
-        };
-        constexpr int SPOT_COUNT = sizeof(SPOTS) / sizeof(SPOTS[0]);
+        constexpr float POS_X = 0.0f, POS_Y = 0.02f, POS_Z = 1.9f, TILT = 90.0f;
         constexpr float BAR_WIDTH = 110.0f;
         constexpr int DONE_SECONDS = 6;
 
@@ -54,8 +44,7 @@ namespace StudioSync::Indicator {
         UnityW<UnityEngine::GameObject> root;
         UnityW<HMUI::CurvedTextMeshPro> head, line, sub;
         UnityW<UnityEngine::UI::Image> barBack, bar;
-        int placedAt = -1;
-        bool preview = false, polling = false, shown = false;
+        bool polling = false, shown = false;
         // What finished last, shown for a few seconds after the work is done.
         Activity::Kind lastKind = Activity::Kind::None;
         Clock::time_point doneUntil{};
@@ -143,21 +132,11 @@ namespace StudioSync::Indicator {
             sub = MakeText(rect, 6.0f, -7.0f, {0.6f, 0.65f, 0.7f, 1.0f});
             barBack = MakeBar(rect, BAR_WIDTH, {1.0f, 1.0f, 1.0f, 0.15f}, false);
             bar = MakeBar(rect, BAR_WIDTH, {0.24f, 0.86f, 0.52f, 0.9f}, true);
+            go->get_transform()->set_position({POS_X, POS_Y, POS_Z});
+            go->get_transform()->set_eulerAngles({TILT, 0.0f, 0.0f});
             root = go;
-            placedAt = -1;
             go->SetActive(false);
             shown = false;
-        }
-
-        void Place() {
-            int spot = std::clamp(getConfig().IndicatorSpot.GetValue(), 0, SPOT_COUNT - 1);
-            if (!root || spot == placedAt)
-                return;
-            auto const& s = SPOTS[spot];
-            auto t = root->get_transform();
-            t->set_position({s.x, s.y, s.z});
-            t->set_eulerAngles({s.rx, 0.0f, 0.0f});
-            placedAt = spot;
         }
 
         void SetBar(bool on, float fill) {
@@ -173,12 +152,7 @@ namespace StudioSync::Indicator {
             std::string l, s;
             bool showBar = false;
             float fill = 0.0f;
-            if (preview && a.kind == Activity::Kind::None && !done) {
-                l = "Downloading songs   12 of 40";
-                s = "for MSploit - Session   ·   preview, spot: " + SpotName(getConfig().IndicatorSpot.GetValue());
-                showBar = true;
-                fill = 0.3f;
-            } else if (done) {
+            if (done) {
                 l = doneLine;
                 s = doneSub;
             } else if (a.kind == Activity::Kind::Downloading) {
@@ -249,7 +223,7 @@ namespace StudioSync::Indicator {
                 lastKind = Activity::Kind::None;
             }
             bool done = a.kind == Activity::Kind::None && Clock::now() < doneUntil;
-            bool want = preview || (getConfig().ShowIndicator.GetValue() && (a.kind != Activity::Kind::None || done));
+            bool want = getConfig().ShowIndicator.GetValue() && (a.kind != Activity::Kind::None || done);
             if (!want) {
                 if (root && shown) {
                     root->SetActive(false);
@@ -259,7 +233,6 @@ namespace StudioSync::Indicator {
             }
             if (!root)
                 Build();
-            Place();
             // Checking for the menu looks through objects, so only the poll does it; changes in between update text.
             if (fromPoll) {
                 bool show = InMenu();
@@ -278,22 +251,4 @@ namespace StudioSync::Indicator {
         Update(false);
     }
 
-    int SpotCount() {
-        return SPOT_COUNT;
-    }
-    std::string SpotName(int spot) {
-        return SPOTS[std::clamp(spot, 0, SPOT_COUNT - 1)].name;
-    }
-    void SetSpot(int spot) {
-        getConfig().IndicatorSpot.SetValue(((spot % SPOT_COUNT) + SPOT_COUNT) % SPOT_COUNT);
-        Update(false);
-    }
-
-    bool Previewing() {
-        return preview;
-    }
-    void SetPreview(bool on) {
-        preview = on;
-        Update(true);
-    }
 }

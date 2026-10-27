@@ -28,7 +28,6 @@ DECLARE_CONFIG(Config) {
     // the last Get missing songs Studio asked for that ran here, and what it did (sent again if the answer got lost)
     CONFIG_VALUE(MissingDone, std::string, "missingDone", "");
     CONFIG_VALUE(MissingResult, std::string, "missingResult", "");
-    // the progress line in the menu while songs download or get cleaned up, and where it sits
+    // the progress line in the menu while songs download or get cleaned up
     CONFIG_VALUE(ShowIndicator, bool, "showIndicator", true);
-    CONFIG_VALUE(IndicatorSpot, int, "indicatorSpot", 3);  // 3 = Floor
 };
