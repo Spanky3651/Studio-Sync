@@ -19,4 +19,16 @@ DECLARE_CONFIG(Config) {
     // the last song clean up Studio asked for that ran here, and what it did (sent again if the answer got lost)
     CONFIG_VALUE(CleanupDone, std::string, "cleanupDone", "");
     CONFIG_VALUE(CleanupResult, std::string, "cleanupResult", "");
+    // Auto-download per playlist: autoDownload above is the choice for playlists without their own, these lists
+    // hold the playlist files switched the other way.
+    CONFIG_VALUE(AutoOff, std::vector<std::string>, "autoDownloadOff", std::vector<std::string>{});
+    CONFIG_VALUE(AutoOn, std::vector<std::string>, "autoDownloadOn", std::vector<std::string>{});
+    // the auto-download change from Studio last taken here (the time Studio saved it)
+    CONFIG_VALUE(AutoApplied, int, "autoDownloadApplied", 0);
+    // the last Get missing songs Studio asked for that ran here, and what it did (sent again if the answer got lost)
+    CONFIG_VALUE(MissingDone, std::string, "missingDone", "");
+    CONFIG_VALUE(MissingResult, std::string, "missingResult", "");
+    // the progress line in the menu while songs download or get cleaned up, and where it sits
+    CONFIG_VALUE(ShowIndicator, bool, "showIndicator", true);
+    CONFIG_VALUE(IndicatorSpot, int, "indicatorSpot", 0);
 };

@@ -39,6 +39,16 @@ namespace StudioSync {
         std::string file, title;
         int count = 0;
         bool shared = true;
+        bool autoDownload = true;
+    };
+
+    // What's running that takes a while, for the progress line in the menu.
+    struct Activity {
+        enum class Kind { None, Downloading, Cleaning };
+        Kind kind = Kind::None;
+        std::string playlist;  // the playlist whose songs are downloading
+        int done = 0, total = 0;
+        int list = 0, lists = 0;  // which playlist of how many (downloads)
     };
 
     // All of these run on the main thread.
@@ -46,8 +56,14 @@ namespace StudioSync {
     bool IsLinking();
     bool IsSyncing();  // also true while songs are downloading
     bool IsDownloading();
+    Activity const& GetActivity();
+
+    // Auto-download, per playlist: when Studio sends, edits or restores a playlist, the songs it's missing download
+    // if its switch is on. Playlists without their own choice follow AutoDownload().
     bool AutoDownload();
-    void SetAutoDownload(bool on);
+    bool PlaylistAutoDownload(std::string const& file);
+    void SetPlaylistAutoDownload(std::string const& file, bool on);
+    void SetAllAutoDownload(bool on);
     std::string const& Code();
     std::string const& Status();
     Summary const& GetSummary();
@@ -70,6 +86,8 @@ namespace StudioSync {
     // download is queued and runs right after it; an automatic one skipped during downloads runs then too.
     void SyncNow(int minGapSeconds = 0);
     bool SyncQueued();
+    // Once a minute in the menu: ask Playlist Studio (one cheap request) whether anything new is waiting, and sync if so.
+    void StartMenuChecks();
 
     // Songs every playlist on the headset lists but it doesn't have; Get missing downloads them.
     int MissingSongs();

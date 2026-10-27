@@ -5,6 +5,8 @@
 #include <chrono>
 #include <vector>
 
+#include "Config.hpp"
+#include "Indicator.hpp"
 #include "Sync.hpp"
 #include "main.hpp"
 
@@ -89,7 +91,7 @@ namespace {
 
     UnityW<HMUI::CurvedTextMeshPro> statusText, codeText, detailText;
     UnityW<UnityEngine::UI::Button> linkButton, cancelButton, syncButton, unlinkButton;
-    UnityW<UnityEngine::GameObject> linkedRow, downloadToggle;
+    UnityW<UnityEngine::GameObject> linkedRow;
     UnityW<BSML::ModalView> shareModal;
     UnityW<UnityEngine::Transform> shareList;
     std::vector<UnityW<UnityEngine::GameObject>> shareRows;
@@ -102,6 +104,13 @@ namespace {
     UnityW<BSML::ModalView> cleanModal;
     UnityW<HMUI::CurvedTextMeshPro> cleanText;
     bool cleanArmed = false;
+    // Options window: the progress line in the menu, and auto-download per playlist.
+    UnityW<BSML::ModalView> optionsModal;
+    UnityW<UnityEngine::Transform> optionsList;
+    std::vector<UnityW<UnityEngine::GameObject>> optionsRows;
+    UnityW<UnityEngine::UI::Button> spotButton, previewButton;
+    UnityW<HMUI::CurvedTextMeshPro> autoCount;
+    bool autoChanged = false;
 
     std::string Plural(int n, std::string const& one, std::string const& many) {
         return std::to_string(n) + " " + (n == 1 ? one : many);
@@ -301,8 +310,6 @@ namespace {
             linkedRow->SetActive(linked && !linking);
         if (songsRow)
             songsRow->SetActive(linked && !linking);
-        if (downloadToggle)
-            downloadToggle->SetActive(linked && !linking);
         // Sync now stays pressable: during a sync or song download the press is queued (see the status line).
         if (syncButton)
             syncButton->set_interactable(true);
@@ -428,6 +435,120 @@ namespace {
         });
     }
 
+    // ---- Options: the progress line in the menu, and auto-download per playlist ----
+    void UpdateOptionButtons() {
+        if (spotButton)
+            BSML::Lite::SetButtonText(spotButton.ptr(), "Spot: " + Indicator::SpotName(getConfig().IndicatorSpot.GetValue()));
+        if (previewButton)
+            BSML::Lite::SetButtonText(previewButton.ptr(), Indicator::Previewing() ? "Preview: on" : "Preview: off");
+    }
+
+    void UpdateAutoCount() {
+        if (!autoCount)
+            return;
+        int on = 0, all = 0;
+        for (auto const& p : HeadsetPlaylists()) {
+            all++;
+            on += p.autoDownload ? 1 : 0;
+        }
+        autoCount->set_text(std::to_string(on) + " of " + std::to_string(all) +
+                            " playlists download the songs they're missing when Studio sends, edits or restores them. Get missing downloads for every playlist either way.");
+    }
+
+    void FillAutoList() {
+        if (!optionsList)
+            return;
+        for (auto& row : optionsRows)
+            if (row)
+                UnityEngine::Object::Destroy(row.ptr());
+        optionsRows.clear();
+        auto list = HeadsetPlaylists();
+        if (list.empty())
+            optionsRows.push_back(Sized(BSML::Lite::CreateText(optionsList.ptr(), "No playlists of your own on this headset yet.", TMPro::FontStyles::Italic, 3.5), 6.0f)->get_gameObject());
+        for (auto const& p : list) {
+            auto file = p.file;
+            auto toggle = BSML::Lite::CreateToggle(optionsList.ptr(), Shorten(p.title, 30) + " <color=#9aa4b2>(" + std::to_string(p.count) + ")</color>", p.autoDownload, [file](bool on) {
+                SetPlaylistAutoDownload(file, on);
+                autoChanged = true;
+                UpdateAutoCount();
+            });
+            optionsRows.push_back(Sized(toggle, 7.0f)->get_gameObject());
+        }
+        UpdateAutoCount();
+    }
+
+    // Tell Studio about auto-download changes right away, like Sharing does.
+    void OptionsClosed() {
+        if (autoChanged && IsLinked()) {
+            autoChanged = false;
+            SyncNow();
+        }
+    }
+
+    // Same build as the Sharing window: fixed-height rows in a scroll container.
+    void BuildOptionsModal(UnityEngine::Transform* parent) {
+        auto modal = BSML::Lite::CreateModal(parent, {100, 78}, [] { OptionsClosed(); }, true);
+        optionsModal = modal;
+        auto content = BSML::Lite::CreateScrollableModalContainer(modal);
+        auto layout = content->GetComponent<UnityEngine::UI::VerticalLayoutGroup*>();
+        layout->set_childControlHeight(true);
+        layout->set_childForceExpandHeight(false);
+        layout->set_childAlignment(UnityEngine::TextAnchor::UpperCenter);
+        layout->set_spacing(1.0f);
+        auto parentT = content->get_transform();
+
+        Sized(BSML::Lite::CreateText(parentT, "Progress in the menu", TMPro::FontStyles::Bold, 5), 7.0f)->set_alignment(TMPro::TextAlignmentOptions::Center);
+        auto show = Sized(BSML::Lite::CreateToggle(parentT, "Show download progress", getConfig().ShowIndicator.GetValue(), [](bool on) {
+            getConfig().ShowIndicator.SetValue(on);
+            Indicator::Refresh();
+        }), 7.0f);
+        BSML::Lite::AddHoverHint(show, "A small line in the menu while songs download or get cleaned up, so you see it on any screen");
+        auto row = Sized(BSML::Lite::CreateHorizontalLayoutGroup(parentT), 9.0f);
+        row->set_spacing(2.0f);
+        row->set_childForceExpandWidth(false);
+        row->set_childControlWidth(true);
+        row->set_childAlignment(UnityEngine::TextAnchor::MiddleCenter);
+        spotButton = BSML::Lite::CreateUIButton(row->get_transform(), "Spot", [] {
+            Indicator::SetSpot(getConfig().IndicatorSpot.GetValue() + 1);
+            UpdateOptionButtons();
+        });
+        BSML::Lite::AddHoverHint(spotButton.ptr(), "Where the progress line sits. Turn on Preview to see it.");
+        previewButton = BSML::Lite::CreateUIButton(row->get_transform(), "Preview", [] {
+            Indicator::SetPreview(!Indicator::Previewing());
+            UpdateOptionButtons();
+        });
+        BSML::Lite::AddHoverHint(previewButton.ptr(), "Shows sample progress until you turn it off, so you can check it on every menu screen");
+
+        Sized(BSML::Lite::CreateText(parentT, "Download missing songs", TMPro::FontStyles::Bold, 5), 7.0f)->set_alignment(TMPro::TextAlignmentOptions::Center);
+        auto count = Sized(BSML::Lite::CreateText(parentT, "", TMPro::FontStyles::Normal, 3.2), 13.0f);
+        count->set_alignment(TMPro::TextAlignmentOptions::Center);
+        count->set_enableWordWrapping(true);
+        autoCount = count;
+        auto all = Sized(BSML::Lite::CreateHorizontalLayoutGroup(parentT), 9.0f);
+        all->set_spacing(2.0f);
+        all->set_childForceExpandWidth(false);
+        all->set_childControlWidth(true);
+        all->set_childAlignment(UnityEngine::TextAnchor::MiddleCenter);
+        BSML::Lite::CreateUIButton(all->get_transform(), "All on", [] { SetAllAutoDownload(true); autoChanged = true; FillAutoList(); });
+        BSML::Lite::CreateUIButton(all->get_transform(), "All off", [] { SetAllAutoDownload(false); autoChanged = true; FillAutoList(); });
+        BSML::Lite::CreateUIButton(all->get_transform(), "Done", [] {
+            if (optionsModal)
+                optionsModal->Hide();
+            OptionsClosed();
+        });
+        // Playlist toggles are added straight into the scroll content after the header.
+        optionsList = parentT;
+    }
+
+    void OpenOptions() {
+        if (!optionsModal)
+            return;
+        autoChanged = false;
+        UpdateOptionButtons();
+        FillAutoList();
+        optionsModal->Show();
+    }
+
     void OpenShare() {
         if (!shareModal)
             return;
@@ -502,16 +623,15 @@ namespace {
         auto clean = BSML::Lite::CreateUIButton(songs->get_transform(), "Clean up...", [] { OpenClean(); });
         BSML::Lite::AddHoverHint(clean, "Delete songs that aren't in any playlist. Shows what it would remove first.");
         cleanButton = clean;
-
-        auto dl = Sized(BSML::Lite::CreateToggle(parent, "Download missing songs", AutoDownload(), [](bool on) { SetAutoDownload(on); }), 7.0f);
-        BSML::Lite::AddHoverHint(dl, "Downloads songs you don't have for playlists Studio sends, edits or restores");
-        downloadToggle = dl->get_gameObject();
+        auto options = BSML::Lite::CreateUIButton(songs->get_transform(), "Options...", [] { OpenOptions(); });
+        BSML::Lite::AddHoverHint(options, "Download progress in the menu, and which playlists download their missing songs on their own");
 
         // Below every button, so a long list of changes can never push them off the panel.
         detailText = BSML::Lite::CreateText(parent, "", TMPro::FontStyles::Normal, 3.2);
 
         BuildShareModal(tab->get_transform());
         BuildCleanModal(tab->get_transform());
+        BuildOptionsModal(tab->get_transform());
     }
 
     void TabActivated(UnityEngine::GameObject* tab, bool firstActivation) {
@@ -532,6 +652,8 @@ namespace StudioSync {
         SetListener([]() {
             UpdateTabDot();
             Refresh();
+            Indicator::Refresh();
         });
+        StartMenuChecks();
     }
 }

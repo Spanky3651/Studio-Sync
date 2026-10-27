@@ -89,6 +89,10 @@ namespace StudioSync {
             int64_t orderT = 0;
             std::vector<std::string> orderFiles;
             std::string cleanupId;  // a song clean up Studio asked for
+            // Get missing songs Studio asked for: for these playlists, or every one
+            std::string missingId;
+            std::vector<std::string> missingFiles;
+            bool missingAll = false;
             bool changed = false, reloaded = false, reordered = false;
             int written = 0, removed = 0, failed = 0, shared = 0, total = 0, songsDeleted = 0;
         };
@@ -110,6 +114,14 @@ namespace StudioSync {
         std::chrono::steady_clock::time_point statsAt{};
         // The song clean up Studio asked for that's running now.
         std::string cleanupRunning;
+        // The Get missing songs Studio asked for that's running now.
+        std::string missingRunning;
+        // What's running that takes a while, for the progress line in the menu.
+        Activity activity;
+        // The minute check in the menu: where Studio's change counter stood at the last sync (-1 = not known yet),
+        // and whether this Worker answers the check at all.
+        int64_t knownChg = -1;
+        bool pingOff = false, menuChecks = false;
 
         void Notify() {
             if (listener)
@@ -458,6 +470,20 @@ namespace StudioSync {
         bool Excluded(std::string const& file) {
             auto const& list = getConfig().Excluded.GetValue();
             return std::find(list.begin(), list.end(), file) != list.end();
+        }
+
+        bool InList(std::vector<std::string> const& list, std::string const& file) {
+            return std::find(list.begin(), list.end(), file) != list.end();
+        }
+        // Auto-download for one playlist, without telling the tab (Studio's changes come in mid-sync).
+        void SetAuto(std::string const& file, bool on) {
+            auto off = getConfig().AutoOff.GetValue(), yes = getConfig().AutoOn.GetValue();
+            off.erase(std::remove(off.begin(), off.end(), file), off.end());
+            yes.erase(std::remove(yes.begin(), yes.end(), file), yes.end());
+            if (on != getConfig().AutoDownload.GetValue())
+                (on ? yes : off).push_back(file);
+            getConfig().AutoOff.SetValue(off);
+            getConfig().AutoOn.SetValue(yes);
         }
 
         // ---- songs: which playlists use them, favorites, BeatSaver, deleting ----
@@ -824,6 +850,7 @@ namespace StudioSync {
         void SendInventory(RunPtr run);
         void RefreshStats(bool force);
         void StudioCleanup(std::string id, std::string token);
+        void StudioGetMissing(std::string id, std::vector<std::string> files, bool all, std::string token);
 
         // ---- downloading songs a synced playlist needs ----
         // PlaylistCore does the BeatSaver lookups and installs (the same code as PlaylistManager's
@@ -856,6 +883,7 @@ namespace StudioSync {
 
         void DownloadsDone(JobPtr job) {
             if (job->wanted == 0) {
+                activity = {};
                 downloading = false;
                 if (job->base.empty())
                     SetStatus("Every playlist already has all its songs.");
@@ -879,6 +907,7 @@ namespace StudioSync {
                         std::string text = (job->base.empty() ? "" : job->base + ", ") + std::to_string(summary.downloadedLast) + " song" + (summary.downloadedLast == 1 ? "" : "s") + " downloaded";
                         if (left)
                             text += ". " + std::to_string(left) + " couldn't be found on BeatSaver";
+                        activity = {};
                         downloading = false;
                         SetStatus(text);
                         CountMissingSongs();
@@ -914,6 +943,13 @@ namespace StudioSync {
             }
             job->wanted += missing;
             std::string name = playlist->name;
+            activity.kind = Activity::Kind::Downloading;
+            activity.playlist = name;
+            activity.done = 0;
+            activity.total = missing;
+            activity.list = (int) job->i + 1;
+            activity.lists = (int) job->paths.size();
+            Notify();
             PlaylistCore::DownloadMissingSongsFromPlaylist(
                 playlist,
                 [job, playlist]() {
@@ -922,6 +958,8 @@ namespace StudioSync {
                     DownloadNext(job);
                 },
                 [job, name](int total, int done) {
+                    activity.done = done;
+                    activity.total = total;
                     SetStatus("Downloading songs for " + name + ": " + std::to_string(done) + " of " + std::to_string(total));
                 });
         }
@@ -977,13 +1015,21 @@ namespace StudioSync {
             summary.downloadedLast = summary.notFoundLast = 0;
             summary.songsDeletedLast = run->songsDeleted;
             SetStatus(text);
-            if (getConfig().AutoDownload.GetValue() && !run->touched.empty())
-                StartDownloads(run->touched, text);
+            // Songs download only for playlists whose auto-download is on.
+            std::vector<std::string> wanted;
+            for (auto const& path : run->touched)
+                if (PlaylistAutoDownload(std::filesystem::path(path).filename().string()))
+                    wanted.push_back(path);
+            if (!wanted.empty())
+                StartDownloads(wanted, text);
             // Count once PlaylistCore has picked up what this sync wrote.
             BSML::MainThreadScheduler::ScheduleAfterTime(3.0f, []() { CountMissingSongs(); });
-            RefreshStats(false);
+            // A sync that changed playlists changes what they're missing, which Studio shows per playlist.
+            RefreshStats(run->changed);
             if (!run->cleanupId.empty())
                 StudioCleanup(run->cleanupId, run->token);
+            if (!run->missingId.empty())
+                StudioGetMissing(run->missingId, run->missingFiles, run->missingAll, run->token);
             RunQueued();
         }
 
@@ -1329,6 +1375,7 @@ namespace StudioSync {
                 it.AddMember("count", (int) doc["songs"].Size(), a);
                 it.AddMember("maps", MapCount(doc), a);
                 it.AddMember("sha", rapidjson::Value(Fingerprint(text).c_str(), a), a);
+                it.AddMember("auto", PlaylistAutoDownload(name), a);
                 // Backups Studio can offer to restore.
                 rapidjson::Value baks(rapidjson::kArrayType);
                 if (auto found = backups.find(name); found != backups.end())
@@ -1402,7 +1449,12 @@ namespace StudioSync {
             features.PushBack("storage", a);
             features.PushBack("cleanup", a);
             features.PushBack("order", a);
+            features.PushBack("missing", a);
+            features.PushBack("autodl", a);
             body.AddMember("features", features, a);
+            // The auto-download change from Studio it last took, so Studio stops showing it as waiting.
+            if (int applied = getConfig().AutoApplied.GetValue(); applied > 0)
+                body.AddMember("autodl", applied, a);
             // The "My order" it last put in game, so Studio stops showing it as waiting.
             if (int applied = getConfig().OrderApplied.GetValue(); applied > 0)
                 body.AddMember("order", applied, a);
@@ -1421,6 +1473,8 @@ namespace StudioSync {
         struct StatsWork {
             std::vector<std::pair<std::string, int>> folders;  // song folder, and: 0 in a playlist, 1 in none, 2 in none but a favorite, 3 WIP
             std::string game, disk;
+            std::vector<std::pair<std::string, int>> missingBy;  // playlist file, songs it lists that aren't downloaded
+            int missing = 0;                                     // those songs, counted once
         };
 
         int64_t FolderBytes(std::string const& path) {
@@ -1452,8 +1506,29 @@ namespace StudioSync {
             if (!SongCore::API::Loading::AreSongsLoaded() || SongCore::API::Loading::AreSongsRefreshing())
                 return;
             auto favorites = GetFavorites();
-            auto used = SongsInPlaylists();
             auto work = std::make_shared<StatsWork>();
+            // Every playlist's songs in one pass: which songs any playlist uses, and what each one is missing.
+            std::set<std::string> used, missingAll;
+            {
+                std::error_code ec;
+                for (auto const& entry : std::filesystem::directory_iterator(PlaylistsDir(), ec)) {
+                    auto name = entry.path().filename().string();
+                    if (!entry.is_regular_file() || !IsPlaylistFile(name))
+                        continue;
+                    int n = 0;
+                    for (auto const& h : ScanHashes(readfile(entry.path().string()))) {
+                        if (!SongCore::API::Loading::GetLevelByHash(h)) {
+                            n++;
+                            missingAll.insert(h);
+                        }
+                        used.insert(h);
+                    }
+                    if (n > 0)
+                        work->missingBy.emplace_back(name, n);
+                }
+            }
+            work->missing = (int) missingAll.size();
+            std::sort(work->missingBy.begin(), work->missingBy.end(), [](auto const& x, auto const& y) { return x.second > y.second; });
             std::set<std::string> seenPaths;
             for (auto level : SongCore::API::Loading::GetAllLevels()) {
                 if (!level)
@@ -1502,6 +1577,21 @@ namespace StudioSync {
                 body.AddMember("free", freeBytes, a);
                 body.AddMember("mod", rapidjson::Value(VERSION, a), a);
                 body.AddMember("game", rapidjson::Value(work->game.c_str(), a), a);
+                body.AddMember("missing", work->missing, a);
+                // Most missing first, kept under the Worker's size limit for this report (older Workers allow 4000 bytes).
+                rapidjson::Value by(rapidjson::kArrayType);
+                size_t room = 3400 > ToJson(body).size() ? 3400 - ToJson(body).size() : 0;
+                for (auto const& [file, n] : work->missingBy) {
+                    size_t need = file.size() + 24;
+                    if (need > room)
+                        break;
+                    room -= need;
+                    rapidjson::Value e(rapidjson::kArrayType);
+                    e.PushBack(rapidjson::Value(file.c_str(), a), a);
+                    e.PushBack(n, a);
+                    by.PushBack(e, a);
+                }
+                body.AddMember("missingBy", by, a);
                 auto text = ToJson(body);
                 BSML::MainThreadScheduler::Schedule([text]() {
                     statsRunning = false;
@@ -1598,6 +1688,94 @@ namespace StudioSync {
                             });
                         });
                     });
+            });
+        }
+
+        // ---- Get missing songs asked for in Studio ----
+        // The same download as Get missing in the tab, for the playlists Studio picked (or all of them). It runs once
+        // nothing else is going on and no song is playing; Studio keeps showing it as waiting until it's done.
+
+        void AckMissing(std::string const& id, std::string const& token, std::string const& body) {
+            Post(Server() + "/link/getmissing/" + id + "/ack", token, body, [id](Response r) {
+                if (!r.IsSuccessful())
+                    logger.warn("Could not tell Studio get missing {} is done (http {})", id, r.httpCode);
+            });
+        }
+
+        void MissingFinished(std::string const& id, std::string const& token, int downloaded, int notFound) {
+            rapidjson::Document d(rapidjson::kObjectType);
+            auto& a = d.GetAllocator();
+            d.AddMember("downloaded", downloaded, a);
+            d.AddMember("notFound", notFound, a);
+            auto body = ToJson(d);
+            getConfig().MissingDone.SetValue(id);
+            getConfig().MissingResult.SetValue(body);
+            missingRunning.clear();
+            AckMissing(id, token, body);
+            RefreshStats(true);
+        }
+
+        void StudioGetMissing(std::string id, std::vector<std::string> files, bool all, std::string token) {
+            if (id == getConfig().MissingDone.GetValue()) {
+                // Done already; Studio didn't hear about it.
+                auto result = getConfig().MissingResult.GetValue();
+                AckMissing(id, token, result.empty() ? "{}" : result);
+                return;
+            }
+            if (!missingRunning.empty())
+                return;
+            missingRunning = id;
+            BSML::MainThreadScheduler::ScheduleUntil([]() { return !syncing && !downloading && !cleaning && !Playing() && PlaylistCore::hasLoaded; }, [id, files, all, token]() {
+                if (token != getConfig().Token.GetValue()) {
+                    missingRunning.clear();
+                    return;
+                }
+                std::set<std::string> only(files.begin(), files.end());
+                std::vector<std::string> paths;
+                for (auto playlist : PlaylistCore::GetLoadedPlaylists())
+                    if (playlist && playlist->playlistCS && (all || only.contains(std::filesystem::path(playlist->path).filename().string())) &&
+                        PlaylistCore::PlaylistHasMissingSongs(playlist) > 0)
+                        paths.push_back(playlist->path);
+                summary.downloadedLast = summary.notFoundLast = 0;
+                if (paths.empty()) {
+                    MissingFinished(id, token, 0, 0);
+                    return;
+                }
+                SetStatus("Playlist Studio asked for missing songs...");
+                StartDownloads(paths, "");
+                BSML::MainThreadScheduler::ScheduleUntil([]() { return !downloading; }, [id, token]() {
+                    MissingFinished(id, token, summary.downloadedLast, summary.notFoundLast);
+                });
+            });
+        }
+
+        // ---- the minute check in the menu ----
+
+        void MenuCheck() {
+            BSML::MainThreadScheduler::ScheduleAfterTime(60.0f, []() {
+                MenuCheck();
+                auto token = getConfig().Token.GetValue();
+                if (token.empty() || pingOff || !pendingToken.empty() || syncing || downloading || cleaning || Playing())
+                    return;
+                // A sync just ran (or one is due from the main menu anyway).
+                if (lastSync.time_since_epoch().count() != 0 && std::chrono::steady_clock::now() - lastSync < std::chrono::seconds(50))
+                    return;
+                Get(Server() + "/link/ping", token, [token](Response r) {
+                    if (token != getConfig().Token.GetValue())
+                        return;
+                    if (r.httpCode == 404) {
+                        // An older Worker without the check: syncs happen the old way (going back to the main menu).
+                        pingOff = true;
+                        logger.info("Playlist Studio doesn't answer the menu check; syncing on the main menu only");
+                        return;
+                    }
+                    rapidjson::Document doc;
+                    if (!r.IsSuccessful() || !ParseJson(r, doc))
+                        return;
+                    auto chg = doc.FindMember("chg");
+                    if (chg != doc.MemberEnd() && chg->value.IsInt64() && chg->value.GetInt64() > knownChg && !Playing())
+                        SyncNow(20);
+                });
             });
         }
 
@@ -1810,6 +1988,10 @@ namespace StudioSync {
         }
         SaveRemovedList(hashes, looseInfo);
         cleaning = true;
+        activity.kind = Activity::Kind::Cleaning;
+        activity.playlist.clear();
+        activity.done = 0;
+        activity.total = (int) hashes.size();
         loose.state = LooseSongs::State::Deleting;
         loose.toDelete = (int) hashes.size();
         loose.progress = 0;
@@ -1819,10 +2001,12 @@ namespace StudioSync {
             paths, 0,
             [total = hashes.size()](int n) {
                 loose.progress = n;
+                activity.done = n;
                 SetStatus("Cleaning up songs: " + std::to_string(n) + " of " + std::to_string(total));
             },
             [](int gone) {
                 cleaning = false;
+                activity = {};
                 statsDirty = true;
                 loose.state = LooseSongs::State::Done;
                 loose.progress = gone;
@@ -1836,12 +2020,34 @@ namespace StudioSync {
     bool IsDownloading() {
         return downloading;
     }
+    Activity const& GetActivity() {
+        return activity;
+    }
     bool AutoDownload() {
         return getConfig().AutoDownload.GetValue();
     }
-    void SetAutoDownload(bool on) {
-        getConfig().AutoDownload.SetValue(on);
+    bool PlaylistAutoDownload(std::string const& file) {
+        if (InList(getConfig().AutoOff.GetValue(), file))
+            return false;
+        if (InList(getConfig().AutoOn.GetValue(), file))
+            return true;
+        return getConfig().AutoDownload.GetValue();
+    }
+    void SetPlaylistAutoDownload(std::string const& file, bool on) {
+        SetAuto(file, on);
         Notify();
+    }
+    void SetAllAutoDownload(bool on) {
+        getConfig().AutoDownload.SetValue(on);
+        getConfig().AutoOff.SetValue({});
+        getConfig().AutoOn.SetValue({});
+        Notify();
+    }
+    void StartMenuChecks() {
+        if (menuChecks)
+            return;
+        menuChecks = true;
+        MenuCheck();
     }
     std::string const& Code() {
         return code;
@@ -1873,7 +2079,7 @@ namespace StudioSync {
             if (!ParseText(readfile(entry.path().string()), doc) || !IsPlaylist(doc))
                 continue;
             auto title = GetString(doc, "playlistTitle");
-            out.push_back({name, title.empty() ? name : title, (int) doc["songs"].Size(), !Excluded(name)});
+            out.push_back({name, title.empty() ? name : title, (int) doc["songs"].Size(), !Excluded(name), PlaylistAutoDownload(name)});
         }
         std::sort(out.begin(), out.end(), [](auto const& a, auto const& b) { return a.title < b.title; });
         return out;
@@ -2016,6 +2222,37 @@ namespace StudioSync {
                 if (ValidId(id))
                     run->cleanupId = id;
             }
+            if (auto gm = doc.FindMember("getMissing"); gm != doc.MemberEnd() && gm->value.IsObject()) {
+                auto id = GetString(gm->value, "id");
+                if (ValidId(id)) {
+                    run->missingId = id;
+                    auto all = gm->value.FindMember("all");
+                    run->missingAll = all != gm->value.MemberEnd() && all->value.IsBool() && all->value.GetBool();
+                    auto files = gm->value.FindMember("files");
+                    if (files != gm->value.MemberEnd() && files->value.IsArray())
+                        for (auto const& f : files->value.GetArray())
+                            if (f.IsString() && ValidFile(f.GetString()))
+                                run->missingFiles.push_back(f.GetString());
+                }
+            }
+            // Auto-download switches changed in Studio take effect now, before this sync decides what to download.
+            if (auto adl = doc.FindMember("autodl"); adl != doc.MemberEnd() && adl->value.IsObject()) {
+                auto t = adl->value.FindMember("t");
+                auto set = adl->value.FindMember("set");
+                if (t != adl->value.MemberEnd() && t->value.IsInt64() && t->value.GetInt64() > getConfig().AutoApplied.GetValue() && set != adl->value.MemberEnd() && set->value.IsArray()) {
+                    for (auto const& e : set->value.GetArray()) {
+                        if (!e.IsObject())
+                            continue;
+                        auto file = GetString(e, "file");
+                        auto on = e.FindMember("on");
+                        if (ValidFile(file) && on != e.MemberEnd() && on->value.IsBool())
+                            SetAuto(file, on->value.GetBool());
+                    }
+                    getConfig().AutoApplied.SetValue((int) t->value.GetInt64());
+                }
+            }
+            if (auto chg = doc.FindMember("chg"); chg != doc.MemberEnd() && chg->value.IsInt64())
+                knownChg = chg->value.GetInt64();
             ApplyWrite(run, 0);
         });
     }
