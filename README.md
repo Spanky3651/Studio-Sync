@@ -16,7 +16,7 @@ It works the other way too. The playlists already on your headset show up in Stu
 - **Nothing gets lost.** Every edit keeps a backup, deleted playlists wait 30 days in Recently deleted, and a new playlist never overwrites one with the same name.
 - **More than one Quest?** Link them all and send to one or every headset.
 
-![Studio Sync in Playlist Studio: the storage card, a playlist being edited, and a new order on its way to the headset](docs/studio.jpg)
+![Studio Sync in Playlist Studio: the storage card, a playlist being edited, and your in-game favorites with a change on its way to the headset](docs/studio.jpg)
 
 ## Use it
 1. Install `StudioSync.qmod` with your mod manager (MBF, QuestPatcher).
