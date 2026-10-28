@@ -42,6 +42,7 @@
 #include "GlobalNamespace/SelectLevelCategoryViewController.hpp"
 #include "HMUI/ScrollView.hpp"
 #include "HMUI/TableView.hpp"
+#include "System/Action.hpp"
 #include "System/Collections/Generic/HashSet_1.hpp"
 #include "System/Collections/Generic/IReadOnlyList_1.hpp"
 #include "System/Threading/CancellationTokenSource.hpp"
@@ -58,6 +59,11 @@ namespace StudioSync {
         constexpr int64_t KEEP_DELETED_SECONDS = 30 * 86400;  // deleted playlists stay restorable this long
         constexpr size_t MAX_DELETED_LISTED = 30;
         constexpr int STATS_EVERY_SECONDS = 30 * 60;  // headset storage for Studio, at most this often unless something changed
+        // Get missing for favorites: PlaylistCore downloads songs for playlists, so the favorites that aren't downloaded go in
+        // this playlist for the download and it's deleted after. A filter keeps it out of song select, and nothing that
+        // reads the playlist folder (sharing, clean up, storage) counts it.
+        constexpr std::string_view FAV_TEMP = "StudioSync favorites.bplist";
+        constexpr size_t MAX_FAVORITES = 3000;
 
         using Http::Response;
         using SyncedMap = std::map<std::string, int64_t>;
@@ -92,7 +98,7 @@ namespace StudioSync {
             // Get missing songs Studio asked for: for these playlists, or every one
             std::string missingId;
             std::vector<std::string> missingFiles;
-            bool missingAll = false;
+            bool missingAll = false, missingFavorites = false;
             bool changed = false, reloaded = false, reordered = false;
             int written = 0, removed = 0, failed = 0, shared = 0, total = 0, songsDeleted = 0;
         };
@@ -234,9 +240,9 @@ namespace StudioSync {
                 return false;
             return std::all_of(id.begin(), id.end(), [](char c) { return std::isalnum((unsigned char) c); });
         }
-        // A plain file name inside the playlist folder, never a path.
+        // A plain file name inside the playlist folder, never a path (and never the temporary favorites playlist).
         bool ValidFile(std::string const& f) {
-            if (f.empty() || f.size() > 200 || f == "." || f == ".." || f.find_first_of("/\\") != std::string::npos || f.find('\0') != std::string::npos)
+            if (f.empty() || f.size() > 200 || f == "." || f == ".." || f == FAV_TEMP || f.find_first_of("/\\") != std::string::npos || f.find('\0') != std::string::npos)
                 return false;
             auto lower = f;
             std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -532,6 +538,8 @@ namespace StudioSync {
             return out;
         }
         bool IsPlaylistFile(std::string const& name) {
+            if (name == FAV_TEMP)
+                return false;
             auto l = Lower(name);
             return l.ends_with(".bplist") || l.ends_with(".json");
         }
@@ -549,13 +557,41 @@ namespace StudioSync {
         }
 
         using Favorites = System::Collections::Generic::HashSet_1<StringW>;
+        GlobalNamespace::PlayerDataModel* GetPlayerDataModel() {
+            for (auto model : UnityEngine::Resources::FindObjectsOfTypeAll<GlobalNamespace::PlayerDataModel*>())
+                if (model && model->get_playerData())
+                    return model;
+            return nullptr;
+        }
         // The player's in-game favorites, or null before the game has loaded player data.
         // Nothing deletes songs without them.
         Favorites* GetFavorites() {
-            for (auto model : UnityEngine::Resources::FindObjectsOfTypeAll<GlobalNamespace::PlayerDataModel*>())
-                if (model && model->get_playerData())
-                    return model->get_playerData()->get_favoritesLevelIds();
-            return nullptr;
+            auto model = GetPlayerDataModel();
+            return model ? model->get_playerData()->get_favoritesLevelIds() : nullptr;
+        }
+        std::string Upper(std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::toupper(c); });
+            return s;
+        }
+        // The custom songs in the favorites: hash -> the exact level ID the game stored. Read straight from the set's
+        // slots (what its enumerator walks), so no generic method has to exist in the game. The game's own levels are left out.
+        std::map<std::string, std::string> FavoriteIds(Favorites* favs) {
+            std::map<std::string, std::string> out;
+            if (!favs)
+                return out;
+            auto slots = favs->_slots;
+            if (!slots.convert())
+                return out;
+            int last = std::min<int>(favs->_lastIndex, (int) slots.size());
+            for (int i = 0; i < last; i++) {
+                auto const& slot = slots[i];
+                if (slot.hashCode < 0 || !slot.value)
+                    continue;
+                std::string id(slot.value);
+                if (auto h = HashOfLevelId(id); !h.empty())
+                    out.emplace(h, id);
+            }
+            return out;
         }
         bool IsWip(SongCore::SongLoader::CustomBeatmapLevel* level) {
             return std::string_view(level->customLevelPath).find("CustomWIPLevels") != std::string_view::npos;
@@ -850,7 +886,7 @@ namespace StudioSync {
         void SendInventory(RunPtr run);
         void RefreshStats(bool force);
         void StudioCleanup(std::string id, std::string token);
-        void StudioGetMissing(std::string id, std::vector<std::string> files, bool all, std::string token);
+        void StudioGetMissing(std::string id, std::vector<std::string> files, bool all, bool favorites, std::string token);
 
         // ---- downloading songs a synced playlist needs ----
         // PlaylistCore does the BeatSaver lookups and installs (the same code as PlaylistManager's
@@ -1029,7 +1065,7 @@ namespace StudioSync {
             if (!run->cleanupId.empty())
                 StudioCleanup(run->cleanupId, run->token);
             if (!run->missingId.empty())
-                StudioGetMissing(run->missingId, run->missingFiles, run->missingAll, run->token);
+                StudioGetMissing(run->missingId, run->missingFiles, run->missingAll, run->missingFavorites, run->token);
             RunQueued();
         }
 
@@ -1451,7 +1487,31 @@ namespace StudioSync {
             features.PushBack("order", a);
             features.PushBack("missing", a);
             features.PushBack("autodl", a);
+            features.PushBack("favorites", a);
             body.AddMember("features", features, a);
+            // In-game favorites (left out until the game has loaded them, so a slow start never looks like none).
+            if (auto favs = GetFavorites()) {
+                rapidjson::Value fv(rapidjson::kObjectType);
+                bool shared = getConfig().ShareFavorites.GetValue();
+                fv.AddMember("shared", shared, a);
+                if (shared) {
+                    bool ready = SongCore::API::Loading::AreSongsLoaded() && !SongCore::API::Loading::AreSongsRefreshing();
+                    rapidjson::Value hs(rapidjson::kArrayType), miss(rapidjson::kArrayType);
+                    for (auto const& [h, id] : FavoriteIds(favs)) {
+                        if (hs.Size() >= MAX_FAVORITES)
+                            break;
+                        hs.PushBack(rapidjson::Value(h.c_str(), a), a);
+                        if (ready && !SongCore::API::Loading::GetLevelByHash(h))
+                            miss.PushBack(rapidjson::Value(h.c_str(), a), a);
+                    }
+                    fv.AddMember("hashes", hs, a);
+                    if (ready)
+                        fv.AddMember("missing", miss, a);
+                }
+                body.AddMember("favorites", fv, a);
+            }
+            if (int applied = getConfig().FavApplied.GetValue(); applied > 0)
+                body.AddMember("favApplied", applied, a);
             // The auto-download change from Studio it last took, so Studio stops showing it as waiting.
             if (int applied = getConfig().AutoApplied.GetValue(); applied > 0)
                 body.AddMember("autodl", applied, a);
@@ -1715,7 +1775,44 @@ namespace StudioSync {
             RefreshStats(true);
         }
 
-        void StudioGetMissing(std::string id, std::vector<std::string> files, bool all, std::string token) {
+        std::string FavTempPath() {
+            return PathIn(std::string(FAV_TEMP));
+        }
+        // Deletes the temporary favorites playlist (left over if the game closed mid-download).
+        void RemoveFavTemp() {
+            std::error_code ec;
+            auto path = FavTempPath();
+            if (!std::filesystem::exists(path, ec))
+                return;
+            RemoveFile(path);
+            if (std::filesystem::exists(path, ec))
+                std::filesystem::remove(path, ec);
+        }
+        // Writes the temporary playlist with the favorites that aren't downloaded; false when there are none.
+        bool WriteFavTemp() {
+            if (!getConfig().ShareFavorites.GetValue())
+                return false;
+            auto favs = GetFavorites();
+            if (!favs)
+                return false;
+            rapidjson::Document doc(rapidjson::kObjectType);
+            auto& a = doc.GetAllocator();
+            doc.AddMember("playlistTitle", "Favorites", a);
+            doc.AddMember("playlistAuthor", "Studio Sync", a);
+            rapidjson::Value songs(rapidjson::kArrayType);
+            for (auto const& [h, id] : FavoriteIds(favs))
+                if (!SongCore::API::Loading::GetLevelByHash(h)) {
+                    rapidjson::Value sg(rapidjson::kObjectType);
+                    sg.AddMember("hash", rapidjson::Value(h.c_str(), a), a);
+                    songs.PushBack(sg, a);
+                }
+            if (songs.Empty())
+                return false;
+            doc.AddMember("songs", songs, a);
+            return writefile(FavTempPath(), ToJson(doc));
+        }
+
+        void StudioGetMissing(std::string id, std::vector<std::string> files, bool all, bool favorites, std::string token) {
             if (id == getConfig().MissingDone.GetValue()) {
                 // Done already; Studio didn't hear about it.
                 auto result = getConfig().MissingResult.GetValue();
@@ -1725,17 +1822,24 @@ namespace StudioSync {
             if (!missingRunning.empty())
                 return;
             missingRunning = id;
-            BSML::MainThreadScheduler::ScheduleUntil([]() { return !syncing && !downloading && !cleaning && !Playing() && PlaylistCore::hasLoaded; }, [id, files, all, token]() {
+            BSML::MainThreadScheduler::ScheduleUntil([]() { return !syncing && !downloading && !cleaning && !Playing() && PlaylistCore::hasLoaded; }, [id, files, all, favorites, token]() {
                 if (token != getConfig().Token.GetValue()) {
                     missingRunning.clear();
                     return;
                 }
                 std::set<std::string> only(files.begin(), files.end());
                 std::vector<std::string> paths;
-                for (auto playlist : PlaylistCore::GetLoadedPlaylists())
-                    if (playlist && playlist->playlistCS && (all || only.contains(std::filesystem::path(playlist->path).filename().string())) &&
-                        PlaylistCore::PlaylistHasMissingSongs(playlist) > 0)
+                for (auto playlist : PlaylistCore::GetLoadedPlaylists()) {
+                    auto name = playlist ? std::filesystem::path(playlist->path).filename().string() : "";
+                    if (playlist && playlist->playlistCS && name != FAV_TEMP && (all || only.contains(name)) && PlaylistCore::PlaylistHasMissingSongs(playlist) > 0)
                         paths.push_back(playlist->path);
+                }
+                // Favorites' songs: through the temporary playlist, which PlaylistCore picks up on the reload.
+                bool favTemp = favorites && SongCore::API::Loading::AreSongsLoaded() && !SongCore::API::Loading::AreSongsRefreshing() && WriteFavTemp();
+                if (favTemp) {
+                    ReloadPlaylists();
+                    paths.push_back(FavTempPath());
+                }
                 summary.downloadedLast = summary.notFoundLast = 0;
                 if (paths.empty()) {
                     MissingFinished(id, token, 0, 0);
@@ -1743,10 +1847,72 @@ namespace StudioSync {
                 }
                 SetStatus("Playlist Studio asked for missing songs...");
                 StartDownloads(paths, "");
-                BSML::MainThreadScheduler::ScheduleUntil([]() { return !downloading; }, [id, token]() {
+                BSML::MainThreadScheduler::ScheduleUntil([]() { return !downloading; }, [id, token, favTemp]() {
+                    if (favTemp) {
+                        RemoveFavTemp();
+                        ReloadPlaylists();
+                        // The favorites that came down are no longer missing; tell Studio on a sync.
+                        missedSync = true;
+                    }
                     MissingFinished(id, token, summary.downloadedLast, summary.notFoundLast);
+                    RunQueued();
                 });
             });
+        }
+
+        // ---- favorites changed in Studio ----
+        // Each change is one song on or off, so a heart changed in game and another changed in Studio both stay. They go
+        // straight into the game's favorites (only in the menu), and the game saves its player data. Favorites switched off in
+        // Sharing can't be changed from Studio: those changes are dropped.
+        void ApplyFavorites(rapidjson::Value const& v) {
+            auto t = v.FindMember("t");
+            auto set = v.FindMember("set");
+            if (t == v.MemberEnd() || !t->value.IsInt64() || set == v.MemberEnd() || !set->value.IsArray())
+                return;
+            int64_t when = t->value.GetInt64();
+            if (when <= getConfig().FavApplied.GetValue())
+                return;
+            if (!getConfig().ShareFavorites.GetValue()) {
+                getConfig().FavApplied.SetValue((int) when);
+                return;
+            }
+            auto model = GetPlayerDataModel();
+            auto favs = model ? model->get_playerData()->get_favoritesLevelIds() : nullptr;
+            if (!favs || Playing())
+                return;  // the next sync tries again
+            auto have = FavoriteIds(favs);
+            int added = 0, removed = 0;
+            for (auto const& e : set->value.GetArray()) {
+                if (!e.IsArray() || e.Size() != 2 || !e[0].IsString() || !e[1].IsBool())
+                    continue;
+                auto h = Lower(e[0].GetString());
+                if (!IsHash(h))
+                    continue;
+                auto it = have.find(h);
+                if (e[1].GetBool() && it == have.end()) {
+                    // The ID the game uses for this song: the loaded level's own, else SongCore's form for a song not downloaded yet.
+                    std::string id = "custom_level_" + Upper(h);
+                    if (auto level = SongCore::API::Loading::GetLevelByHash(h))
+                        id = std::string(level->levelID);
+                    if (favs->Add(StringW(id))) {
+                        have.emplace(h, id);
+                        added++;
+                    }
+                } else if (!e[1].GetBool() && it != have.end()) {
+                    if (favs->Remove(StringW(it->second))) {
+                        have.erase(it);
+                        removed++;
+                    }
+                }
+            }
+            getConfig().FavApplied.SetValue((int) when);
+            if (added || removed) {
+                auto data = model->get_playerData();
+                if (auto changed = data->favoriteLevelsSetDidChangeEvent)
+                    changed->Invoke();
+                model->Save();
+                logger.info("Favorites from Studio: {} added, {} removed", added, removed);
+            }
         }
 
         // ---- the minute check in the menu ----
@@ -1844,7 +2010,7 @@ namespace StudioSync {
             return;
         std::set<std::string> missing;
         for (auto playlist : PlaylistCore::GetLoadedPlaylists()) {
-            if (!playlist)
+            if (!playlist || std::filesystem::path(playlist->path).filename().string() == FAV_TEMP)
                 continue;
             for (auto const& song : playlist->playlistJSON.Songs) {
                 auto hash = song.Hash ? Lower(*song.Hash) : HashOfLevelId(song.LevelID);
@@ -1862,7 +2028,7 @@ namespace StudioSync {
             return;
         std::vector<std::string> paths;
         for (auto playlist : PlaylistCore::GetLoadedPlaylists())
-            if (playlist && playlist->playlistCS && PlaylistCore::PlaylistHasMissingSongs(playlist) > 0)
+            if (playlist && playlist->playlistCS && std::filesystem::path(playlist->path).filename().string() != FAV_TEMP && PlaylistCore::PlaylistHasMissingSongs(playlist) > 0)
                 paths.push_back(playlist->path);
         if (paths.empty()) {
             summary.missing = 0;
@@ -2049,6 +2215,16 @@ namespace StudioSync {
         menuChecks = true;
         MenuCheck();
     }
+    bool FavoritesShared() {
+        return getConfig().ShareFavorites.GetValue();
+    }
+    void SetFavoritesShared(bool shared) {
+        getConfig().ShareFavorites.SetValue(shared);
+        Notify();
+    }
+    void RegisterPlaylistFilter() {
+        PlaylistCore::AddPlaylistFilter(modInfo, [](std::string const& path) { return std::filesystem::path(path).filename().string() != FAV_TEMP; });
+    }
     std::string const& Code() {
         return code;
     }
@@ -2166,6 +2342,7 @@ namespace StudioSync {
         }
         syncing = true;
         lastSync = now;
+        RemoveFavTemp();
         SetStatus("Syncing...");
         Get(Server() + "/link/manifest", token, [token](Response r) {
             if (token != getConfig().Token.GetValue()) {
@@ -2228,6 +2405,8 @@ namespace StudioSync {
                     run->missingId = id;
                     auto all = gm->value.FindMember("all");
                     run->missingAll = all != gm->value.MemberEnd() && all->value.IsBool() && all->value.GetBool();
+                    auto favs = gm->value.FindMember("favorites");
+                    run->missingFavorites = favs != gm->value.MemberEnd() && favs->value.IsBool() && favs->value.GetBool();
                     auto files = gm->value.FindMember("files");
                     if (files != gm->value.MemberEnd() && files->value.IsArray())
                         for (auto const& f : files->value.GetArray())
@@ -2251,6 +2430,8 @@ namespace StudioSync {
                     getConfig().AutoApplied.SetValue((int) t->value.GetInt64());
                 }
             }
+            if (auto fv = doc.FindMember("favorites"); fv != doc.MemberEnd() && fv->value.IsObject())
+                ApplyFavorites(fv->value);
             if (auto chg = doc.FindMember("chg"); chg != doc.MemberEnd() && chg->value.IsInt64())
                 knownChg = chg->value.GetInt64();
             ApplyWrite(run, 0);

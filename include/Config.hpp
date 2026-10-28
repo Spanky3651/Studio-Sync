@@ -28,6 +28,9 @@ DECLARE_CONFIG(Config) {
     // the last Get missing songs Studio asked for that ran here, and what it did (sent again if the answer got lost)
     CONFIG_VALUE(MissingDone, std::string, "missingDone", "");
     CONFIG_VALUE(MissingResult, std::string, "missingResult", "");
+    // in-game favorites shared with Studio (a switch in Sharing...), and the favorites change from Studio last taken here
+    CONFIG_VALUE(ShareFavorites, bool, "shareFavorites", true);
+    CONFIG_VALUE(FavApplied, int, "favoritesApplied", 0);
     // the progress line in the menu while songs download or get cleaned up
     CONFIG_VALUE(ShowIndicator, bool, "showIndicator", true);
 };

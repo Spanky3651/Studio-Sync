@@ -346,6 +346,13 @@ namespace {
             if (row)
                 UnityEngine::Object::Destroy(row.ptr());
         shareRows.clear();
+        // In-game favorites first: Studio shows them as their own list and can favorite or unfavorite songs.
+        auto favs = BSML::Lite::CreateToggle(shareList.ptr(), "<color=#ff5c8a>\u2665</color> Favorites <color=#9aa4b2>(in game)</color>", FavoritesShared(), [](bool on) {
+            SetFavoritesShared(on);
+            shareChanged = true;
+        });
+        BSML::Lite::AddHoverHint(favs, "Lets Playlist Studio see your favorites, back them up and favorite or unfavorite songs");
+        shareRows.push_back(Sized(favs, 7.0f)->get_gameObject());
         auto list = HeadsetPlaylists();
         if (list.empty())
             shareRows.push_back(Sized(BSML::Lite::CreateText(shareList.ptr(), "No playlists of your own on this headset yet.", TMPro::FontStyles::Italic, 3.5), 6.0f)->get_gameObject());
@@ -392,8 +399,8 @@ namespace {
         row->set_childForceExpandWidth(false);
         row->set_childControlWidth(true);
         row->set_childAlignment(UnityEngine::TextAnchor::MiddleCenter);
-        BSML::Lite::CreateUIButton(row->get_transform(), "Share all", [] { SetAllShared(true); shareChanged = true; FillShareList(); });
-        BSML::Lite::CreateUIButton(row->get_transform(), "Share none", [] { SetAllShared(false); shareChanged = true; FillShareList(); });
+        BSML::Lite::CreateUIButton(row->get_transform(), "Share all", [] { SetAllShared(true); SetFavoritesShared(true); shareChanged = true; FillShareList(); });
+        BSML::Lite::CreateUIButton(row->get_transform(), "Share none", [] { SetAllShared(false); SetFavoritesShared(false); shareChanged = true; FillShareList(); });
         BSML::Lite::CreateUIButton(row->get_transform(), "Done", [] {
             if (shareModal)
                 shareModal->Hide();
@@ -631,5 +638,6 @@ namespace StudioSync {
             Indicator::Refresh();
         });
         StartMenuChecks();
+        RegisterPlaylistFilter();
     }
 }

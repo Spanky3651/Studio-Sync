@@ -76,6 +76,11 @@ namespace StudioSync {
     // Choose whether a playlist is shared with Studio. Takes effect on the next sync.
     void SetShared(std::string const& file, bool shared);
     void SetAllShared(bool shared);
+    // Whether the in-game favorites are shared with Studio (it can see and change them). Takes effect on the next sync.
+    bool FavoritesShared();
+    void SetFavoritesShared(bool shared);
+    // Hides the temporary playlist Get missing uses for favorites' songs from song select. Call once at startup.
+    void RegisterPlaylistFilter();
 
     void StartLink();
     void CancelLink();
