@@ -1,6 +1,6 @@
 # Studio Sync
 
-A Beat Saber Quest mod that links your headset to [Playlist Studio](https://spanky3651.github.io/Playlist-Studio/?utm_source=github&utm_campaign=studio-sync-readme#studio-sync). Playlists you send from Studio land on your headset, and the playlists already on your headset show up in Studio so you can edit them and send them back. No file to load.
+A Beat Saber Quest mod that links your headset to [Playlist Studio](https://spanky3651.github.io/Playlist-Studio/?utm_source=github&utm_campaign=studio-sync-readme#studio-sync). Playlists you send from Studio land on your headset, and the playlists already on your headset show up in Studio so you can edit them and send them back. Your in-game favorites sync both ways too. No file to load.
 
 Built for Beat Saber **1.40.8** (Scotland2). Needs **PlaylistCore**, **BSML** and **SongCore**, which mod managers install with it.
 
@@ -11,12 +11,23 @@ It works the other way too. The playlists already on your headset show up in Stu
 
 - **No cable, no file copying.** Linking is a 6-character code, with no account or password.
 - **Edit what's already on your Quest** from any browser, and changes save and send themselves.
+- **Favorites sync both ways.** Favorite a song in game and it shows up in Studio, or heart one in Studio and it's a favorite in game after the next sync. Studio keeps backups, so a reset never wipes them for good.
 - **Missing songs download on their own** when a playlist arrives.
-- **Your in-game favorites in Studio.** See them, back them up, and favorite or unfavorite songs from any browser.
 - **Nothing gets lost.** Every edit keeps a backup, deleted playlists wait 30 days in Recently deleted, and a new playlist never overwrites one with the same name.
 - **More than one Quest?** Link them all and send to one or every headset.
 
 ![Studio Sync in Playlist Studio: the storage card, a playlist being edited, and your in-game favorites with a change on its way to the headset](docs/studio.jpg)
+
+## Favorites sync
+New in 0.9.2: your in-game favorites sync both ways between your headset and Playlist Studio.
+
+- **Both directions.** Favorite a song in game and it shows up in Studio. Heart a song in Studio and it's a favorite in game after the next sync. Changes go one song at a time, so a heart changed in game and another changed in Studio both stay.
+- **Heart songs anywhere in Studio.** Hearts show on the pinned **Favorites** list and on every song in Your Playlist and the search results, for the headset you're sending to.
+- **Favorites and playlists work together.** Make a playlist from your favorites, or favorite every song in one of your headset playlists from its menu.
+- **Get the missing ones.** Studio shows which favorites aren't downloaded, and the headset fetches them on its next sync.
+- **Backups.** Studio keeps a few copies of your favorites. If a reinstall or reset wipes them, Studio notices and puts them back with one click, or you can restore an older copy.
+- **Take them along.** Copy them to another linked Quest (it only adds) or download them as a `.bplist`.
+- **Your choice.** Switch **Favorites** off under **Sharing...** in the mod and Studio can't see or change them.
 
 ## Use it
 1. Install `StudioSync-1.40.8.qmod` with your mod manager (MBF, QuestPatcher).
@@ -52,7 +63,7 @@ Studio Sync lives on its own tab in **Save and send** (the headset button in the
 
 From 0.8.0, a storage card above the list shows the headset's songs, how much space they take, the songs no playlist uses and the free space, with a **Clean up songs** button. The headset works these out in the background at most every 30 minutes, and again after songs download or get deleted. Headsets on an older version don't show the card, and their order and clean up options stay hidden.
 
-From 0.9.2, **Favorites** is pinned above the headset's playlists with its song count, how many aren't downloaded, and when Studio last backed it up. **Open** lists the songs with a heart to unfavorite or favorite each one, and hearts on songs in Your Playlist and in the search results do the same. Its **...** menu makes a playlist from your favorites, gets the missing songs, copies them to another headset (adds only), downloads them as a `.bplist`, and restores one of Studio's backups. A playlist's own menu has **Add all songs to favorites**. If the game is reset and the favorites come back empty, Studio offers to restore the last backup.
+From 0.9.2, **Favorites** is pinned above the headset's playlists with its song count, how many aren't downloaded, and when Studio last backed it up. **Open** lists the songs with a heart on each, and its **...** menu has the rest (see [Favorites sync](#favorites-sync)).
 
 ## What it touches
 - Songs are deleted only when you ask: with a playlist deleted from Studio (if you tick the option), with **Clean up songs** in Studio, or with **Clean up...** in game. Favorites, WIP maps and songs BeatSaver no longer has are never deleted, and every deleted song can be downloaded again from Recently deleted for 30 days.
