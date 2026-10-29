@@ -2,7 +2,7 @@ name: Build
 
 env:
   module_id: studiosync
-  qmodName: StudioSync
+  qmodName: StudioSync-1.40.8
 
 on:
   workflow_dispatch:

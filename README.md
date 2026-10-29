@@ -19,7 +19,7 @@ It works the other way too. The playlists already on your headset show up in Stu
 ![Studio Sync in Playlist Studio: the storage card, a playlist being edited, and your in-game favorites with a change on its way to the headset](docs/studio.jpg)
 
 ## Use it
-1. Install `StudioSync.qmod` with your mod manager (MBF, QuestPatcher).
+1. Install `StudioSync-1.40.8.qmod` with your mod manager (MBF, QuestPatcher).
 2. In game, open the **Mods** tab in the panel left of song select, pick **Studio Sync** and press **Link**. A 6-character code appears.
 3. In Playlist Studio, open **Studio Sync** and type the code.
 4. In Studio, open **Save and send**, pick the **Studio Sync** tab and press **Send to Quest** for the playlist you're building.
@@ -65,6 +65,6 @@ From 0.9.2, **Favorites** is pinned above the headset's playlists with its song 
 - **Unlink** (here or in Studio) stops syncing. Playlists already on the headset stay.
 
 ## Build
-Pushing to GitHub runs `.github/workflows/build.yml`, which restores dependencies with qpm, builds with the NDK and uploads `StudioSync.qmod` as an artifact.
+Pushing to GitHub runs `.github/workflows/build.yml`, which restores dependencies with qpm, builds with the NDK and uploads `StudioSync-1.40.8.qmod` as an artifact.
 
 Locally: `qpm restore`, then `qpm s qmod`.

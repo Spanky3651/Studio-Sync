@@ -25,7 +25,7 @@
       ],
       "qmod": [
         "pwsh ./scripts/build.ps1 $0?",
-        "pwsh ./scripts/createqmod.ps1 -qmodName StudioSync"
+        "pwsh ./scripts/createqmod.ps1 -qmodName StudioSync-1.40.8"
       ],
       "restart": [
         "pwsh ./scripts/restart-game.ps1"
@@ -39,7 +39,7 @@
       "./extern/libs"
     ],
     "qmodIncludeFiles": [],
-    "qmodOutput": "./StudioSync.qmod",
+    "qmodOutput": "./StudioSync-1.40.8.qmod",
     "ndk": "^27.3.13750724"
   },
   "dependencies": [
