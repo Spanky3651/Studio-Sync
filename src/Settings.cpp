@@ -576,7 +576,7 @@ namespace {
         codeText = BSML::Lite::CreateText(parent, "", TMPro::FontStyles::Bold, 12);
 
         auto link = BSML::Lite::CreateUIButton(parent, "Link", [] { StartLink(); });
-        BSML::Lite::AddHoverHint(link, "Shows a code to type into Playlist Studio's Linked Quest panel");
+        BSML::Lite::AddHoverHint(link, "Shows a code to type at studio.msploit.com (Playlist Studio's Studio Sync panel)");
         linkButton = link;
         cancelButton = BSML::Lite::CreateUIButton(parent, "Cancel", [] { CancelLink(); });
 

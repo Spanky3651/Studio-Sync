@@ -2229,7 +2229,7 @@ namespace StudioSync {
         return code;
     }
     std::string const& Status() {
-        static std::string const linked = "Linked to Playlist Studio.", unlinked = "Not linked yet. Press Link to start.";
+        static std::string const linked = "Linked to Playlist Studio.", unlinked = "Not linked yet. Open studio.msploit.com, then press Link.";
         if (status.empty())
             return IsLinked() ? linked : unlinked;
         return status;
@@ -2295,7 +2295,7 @@ namespace StudioSync {
             }
             code = GetString(doc, "code");
             linkStarted = std::chrono::steady_clock::now();
-            SetStatus("In Playlist Studio, open Linked Quest and type this code.");
+            SetStatus("Go to studio.msploit.com and type this code.");
             ScheduleLinkPoll(token);
         });
     }
